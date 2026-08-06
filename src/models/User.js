@@ -23,7 +23,7 @@ const User = db.define(
   {
     tableName: "User",
     timestamps: true,
-    updatedAt: false,
+    updatedAt: true,
   },
 );
 
