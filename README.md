@@ -8,3 +8,6 @@ npm run dev
 ```
 
 The health endpoint is available at `http://localhost:5050/api/health`.
+
+The local PostgreSQL database is `capstone_iii_dev`. Copy `.env.example` to
+`.env` before starting the API.
