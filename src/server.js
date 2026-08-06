@@ -1,7 +1,7 @@
-import { app } from './app.js';
+const app = require("./app")
 
-const port = Number(process.env.PORT) || 5050;
+const port = Number(process.env.PORT) || 5050
 
 app.listen(port, () => {
-  console.log(`API running at http://localhost:${port}`);
-});
+  console.log(`API running at http://localhost:${port}`)
+})

@@ -1,9 +1,11 @@
-import express from 'express';
+const express = require("express")
 
-export const app = express();
+const app = express()
 
-app.use(express.json());
+app.use(express.json())
 
 app.get('/api/health', (_request, response) => {
-  response.json({ status: 'ok' });
-});
+  response.json({ status: 'ok' })
+})
+
+module.exports = app
