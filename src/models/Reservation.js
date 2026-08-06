@@ -35,3 +35,4 @@ const Reservation = db.define('reservation', {
         defaultValue: 'pending',
     },
 });
+module.exports = Reservation;
