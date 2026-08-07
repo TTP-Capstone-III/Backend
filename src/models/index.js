@@ -1,7 +1,7 @@
-import { sequelize } from "../db";
-import User from "./User";
-import Listing from "./Listing";
-import Reservation from "./Reservation";
+const { sequelize } = require("../db");
+const User = require("./User");
+const Listing = require("./Listing");
+const Reservation = require("./Reservation");
 
 User.hasMany(Listing, {
   foreignKey: "hostId",
@@ -30,4 +30,4 @@ Reservation.belongsTo(Listing, {
   as: "listing",
 });
 
-export { sequelize, User, Listing, Reservation };
+module.exports = { sequelize, User, Listing, Reservation };
