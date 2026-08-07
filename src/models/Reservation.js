@@ -1,38 +1,56 @@
-const { DataTypes } = require('sequelize');
-const db = require('../db')
+const { DataTypes } = require("sequelize");
+const db = require("../db");
+const { vehicleCategories } = require("./Listing");
 
-const Reservation = db.define('reservation', {
+const Reservation = db.define(
+  "Reservation",
+  {
     listingId: {
-        type: DataTypes.INTEGER,
-        allowNull: false,
+      type: DataTypes.INTEGER,
+      allowNull: false,
     },
     driverId: {
-        type: DataTypes.INTEGER,
-        allowNull: false,
+      type: DataTypes.INTEGER,
+      allowNull: false,
     },
-    startDate: {
-        type: DataTypes.DATE,
-        allowNull: false,
+    startTime: {
+      type: DataTypes.DATE,
+      allowNull: false,
     },
-    endDate: {
-        type: DataTypes.DATE,
-        allowNull: false,
+    endTime: {
+      type: DataTypes.DATE,
+      allowNull: false,
     },
-    totalPrice: {
-        type: DataTypes.FLOAT,
-        allowNull: false,
+    driverVehicleCategory: {
+      type: DataTypes.ENUM(...vehicleCategories),
+      allowNull: false,
     },
-    vehicleType: {
-        type: DataTypes.STRING("compact", "sedan", "suv", "truck", "van", "other"),
-        allowNull: false,
+    fitAcknowledged: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: false,
     },
-    acknowledged_custom_fit: {
-        type: DataTypes.BOOLEAN,
-        defaultValue: false,
+    totalPriceCents: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+      validate: {
+        min: 0,
+      },
     },
     status: {
-        type: DataTypes.ENUM('pending', 'confirmed', 'cancelled'),
-        defaultValue: 'pending',
+      type: DataTypes.ENUM("CONFIRMED", "CANCELLED"),
+      allowNull: false,
+      defaultValue: "CONFIRMED",
     },
-});
+  },
+  {
+    tableName: "Reservation",
+    timestamps: true,
+    indexes: [
+      { fields: ["listingId", "startTime", "endTime"] },
+      { fields: ["driverId"] },
+    ],
+  },
+);
+
 module.exports = Reservation;

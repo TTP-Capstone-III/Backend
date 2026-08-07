@@ -8,13 +8,14 @@ const User = db.define(
       type: DataTypes.STRING(80),
       allowNull: false,
     },
-
     email: {
       type: DataTypes.STRING(320),
       allowNull: false,
       unique: true,
+      validate: {
+        isEmail: true,
+      },
     },
-
     passwordHash: {
       type: DataTypes.STRING,
       allowNull: false,
@@ -23,7 +24,6 @@ const User = db.define(
   {
     tableName: "User",
     timestamps: true,
-    updatedAt: true,
   },
 );
 
