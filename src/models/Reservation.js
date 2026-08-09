@@ -54,3 +54,4 @@ const Reservation = db.define(
 );
 
 module.exports = Reservation;
+
