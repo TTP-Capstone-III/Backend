@@ -1,14 +1,23 @@
 const express = require("express");
+const cookieParser = require("cookie-parser"); //request.cookies.session
 const { db } = require("./models");
+
+const authRouter = require("./routes/authRoute");
+const errorHandler = require("./middlewares/errorHandler");
 
 const app = express();
 const PORT = Number(process.env.PORT) || 5050;
 
 app.use(express.json());
+app.use(cookieParser());
+
+app.use("/api/auth", authRouter);
 
 app.get("/api/health", (_request, response) => {
   response.json({ status: "ok" });
 });
+
+app.use(errorHandler);
 
 async function startServer() {
   try {
