@@ -3,6 +3,8 @@ const cookieParser = require("cookie-parser"); //request.cookies.session
 const { db } = require("./models");
 
 const authRouter = require("./routes/authRoute");
+const reservationRouter = require("./routes/reservationRoutes");
+const hostRouter = require("./routes/hostRoutes");
 const errorHandler = require("./middlewares/errorHandler");
 
 const app = express();
@@ -12,6 +14,8 @@ app.use(express.json());
 app.use(cookieParser());
 
 app.use("/api/auth", authRouter);
+app.use("/api/reservations", reservationRouter);
+app.use("/api/host", hostRouter);
 
 app.get("/api/health", (_request, response) => {
   response.json({ status: "ok" });
