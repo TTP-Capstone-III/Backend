@@ -106,7 +106,8 @@ router.post("/quote", requireAuth, async (req, res, next) => {
         error: "You must acknowledge that the vehicle fit is uncertain",
       });
     }
-    const conflict = await Reservation.findOne({ // We only need to know whether one conflict exists.
+    const conflict = await Reservation.findOne({
+      // We only need to know whether one conflict exists.
       where: {
         listingId: parsedListingId,
         status: "CONFIRMED",
@@ -216,7 +217,8 @@ router.post("/", requireAuth, async (req, res, next) => {
   let transaction;
 
   try {
-    transaction = await db.transaction({ // Treat the availability check and creation as one unit.
+    transaction = await db.transaction({
+      // Treat the availability check and creation as one unit.
       isolationLevel: Transaction.ISOLATION_LEVELS.READ_COMMITTED,
     });
 
@@ -261,7 +263,8 @@ router.post("/", requireAuth, async (req, res, next) => {
     }
 
     // Ask the database for one confirmed overlapping reservation
-    const overlapping = await Reservation.findOne({ // Check inside the same locked transaction.
+    const overlapping = await Reservation.findOne({
+      // Check inside the same locked transaction.
       where: {
         listingId: parsedListingId,
         status: "CONFIRMED",
@@ -328,7 +331,8 @@ router.get("/driver", requireAuth, async (req, res, next) => {
         {
           model: Listing,
           as: "listing",
-          attributes: [ // Explicit response allowlist for listing details.
+          attributes: [
+            // Explicit response allowlist for listing details.
             "id",
             "title",
             "neighborhood",
@@ -365,7 +369,8 @@ router.patch("/:id/cancel", requireAuth, async (req, res, next) => {
       return res.status(404).json({ error: "Reservation not found" });
     }
 
-    if (reservation.driverId !== req.user.id) { // Only the driver who booked it may cancel it.
+    if (reservation.driverId !== req.user.id) {
+      // Only the driver who booked it may cancel it.
       return res
         .status(403)
         .json({ error: "Only the driver who booked can cancel" });

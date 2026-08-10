@@ -1,3 +1,4 @@
+const cors = require("cors");
 const express = require("express");
 const cookieParser = require("cookie-parser"); //request.cookies.session
 const { db } = require("./models");
@@ -9,6 +10,10 @@ const errorHandler = require("./middlewares/errorHandler");
 
 const app = express();
 const PORT = Number(process.env.PORT) || 5050;
+
+const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || "http://localhost:5173";
+
+app.use(cors({ origin: CLIENT_ORIGIN, credentials: true }));
 
 app.use(express.json());
 app.use(cookieParser());
