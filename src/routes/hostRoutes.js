@@ -8,7 +8,7 @@ router.get("/listings", requireAuth, async (req, res, next) => {
   try {
     const listings = await Listing.findAll({
       where: {
-        hostId: req.user.id,
+        hostId: req.user.id, // Use the authenticated host, never a user-supplied host ID.
       },
       include: [
         {
@@ -16,23 +16,23 @@ router.get("/listings", requireAuth, async (req, res, next) => {
           as: "reservations",
           attributes: ["id"],
           where: { status: "CONFIRMED" },
-          required: false,
+          required: false, // Keep host listings that currently have zero reservations.
         },
       ],
       order: [["createdAt", "DESC"]],
     });
 
     const formattedListings = listings.map((listingInstance) => {
-      const listing = listingInstance.toJSON();
+      const listing = listingInstance.toJSON(); // Convert the Sequelize instance before reshaping it.
       const result = {
         ...listing,
         _count: {
-          reservations: listing.reservations.length,
+          reservations: listing.reservations.length, // Count only the confirmed rows included above.
         },
       };
 
-      delete result.reservations;
-      delete result.imagePublicId;
+      delete result.reservations; // Return the count instead of the temporary ID array.
+      delete result.imagePublicId; // Do not expose the backend image-storage identifier.
       return result;
     });
 
@@ -58,12 +58,12 @@ router.get("/reservations", requireAuth, async (req, res, next) => {
             "otherVehicleDescription",
           ],
           where: { hostId: req.user.id },
-          required: true,
+          required: true, // Filter out reservations for listings owned by other hosts.
         },
         {
           model: User,
           as: "driver",
-          attributes: ["id", "name"], //select only these attributes
+          attributes: ["id", "name"], // Return safe driver fields without passwordHash.
         },
       ],
       order: [["startTime", "ASC"]],

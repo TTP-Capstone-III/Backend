@@ -1,4 +1,4 @@
-const VEHICLE_RANK = Object.freeze({
+const VEHICLE_RANK = Object.freeze({ // Lower numbers represent smaller vehicle categories.
   COMPACT: 1,
   SEDAN: 2,
   SMALL_SUV: 3,
@@ -7,14 +7,14 @@ const VEHICLE_RANK = Object.freeze({
 });
 
 function evaluateVehicleFit(maxCategory, driverCategory) {
-  if (maxCategory === "OTHER_NOT_SURE" || driverCategory === "OTHER_NOT_SURE") {
+  if (maxCategory === "OTHER_NOT_SURE" || driverCategory === "OTHER_NOT_SURE") { // The driver must confirm uncertain fit.
     return {
       status: "ACK_REQUIRED",
       fits: true,
     };
   }
 
-  const fits = VEHICLE_RANK[driverCategory] <= VEHICLE_RANK[maxCategory];
+  const fits = VEHICLE_RANK[driverCategory] <= VEHICLE_RANK[maxCategory]; // Driver rank cannot exceed the space limit.
 
   return {
     status: fits ? "FITS" : "TOO_LARGE",
@@ -22,10 +22,10 @@ function evaluateVehicleFit(maxCategory, driverCategory) {
   };
 }
 
-//Calculating price based on 30-min blocks
+// Calculate the price using 30-minute billing blocks.
 function calculatePrice(hourlyPriceCents, startTime, endTime) {
   const minutes = (endTime.getTime() - startTime.getTime()) / 60000;
-  const billableBlocks = Math.ceil(minutes / 30); //ceiling
+  const billableBlocks = Math.ceil(minutes / 30); // Round partial blocks up.
 
   return {
     billableBlocks,

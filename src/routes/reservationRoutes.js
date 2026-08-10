@@ -1,5 +1,5 @@
 const express = require("express");
-const { Op, Transaction } = require("sequelize");
+const { Op, Transaction } = require("sequelize"); // Op builds overlap checks; Transaction sets isolation.
 const router = express.Router();
 
 const { db, Listing, Reservation, User } = require("../models");
@@ -7,7 +7,7 @@ const { vehicleCategories } = require("../models/Listing");
 const { evaluateVehicleFit, calculatePrice } = require("../utils/domain");
 const { requireAuth } = require("../middlewares/auth");
 
-const MIN_RESERVATION_MS = 30 * 60 * 1000;
+const MIN_RESERVATION_MS = 30 * 60 * 1000; // Minimum reservation length in milliseconds.
 
 //Validates possible reservation and returns: Calculated price, start/end time, fit result, time conflicts
 router.post("/quote", requireAuth, async (req, res, next) => {
@@ -32,8 +32,8 @@ router.post("/quote", requireAuth, async (req, res, next) => {
     });
   }
 
-  const parsedListingId = Number(listingId);
-  const acknowledgedFit = fitAcknowledged ?? false;
+  const parsedListingId = Number(listingId); // Do not send the raw request value to Sequelize.
+  const acknowledgedFit = fitAcknowledged ?? false; // Default only null or undefined to false.
 
   if (typeof acknowledgedFit !== "boolean") {
     return res
@@ -106,15 +106,15 @@ router.post("/quote", requireAuth, async (req, res, next) => {
         error: "You must acknowledge that the vehicle fit is uncertain",
       });
     }
-    const conflict = await Reservation.findOne({
+    const conflict = await Reservation.findOne({ // We only need to know whether one conflict exists.
       where: {
         listingId: parsedListingId,
         status: "CONFIRMED",
         startTime: {
-          [Op.lt]: end,
+          [Op.lt]: end, // Existing reservation starts before the requested reservation ends.
         },
         endTime: {
-          [Op.gt]: start,
+          [Op.gt]: start, // Existing reservation ends after the requested reservation starts.
         },
       },
     });
@@ -174,8 +174,8 @@ router.post("/", requireAuth, async (req, res, next) => {
     });
   }
 
-  const parsedListingId = Number(listingId);
-  const acknowledgedFit = fitAcknowledged ?? false;
+  const parsedListingId = Number(listingId); // Normalize the request ID before database queries.
+  const acknowledgedFit = fitAcknowledged ?? false; // Omitted acknowledgment means false.
 
   if (typeof acknowledgedFit !== "boolean") {
     return res
@@ -216,7 +216,7 @@ router.post("/", requireAuth, async (req, res, next) => {
   let transaction;
 
   try {
-    transaction = await db.transaction({
+    transaction = await db.transaction({ // Treat the availability check and creation as one unit.
       isolationLevel: Transaction.ISOLATION_LEVELS.READ_COMMITTED,
     });
 
@@ -261,15 +261,15 @@ router.post("/", requireAuth, async (req, res, next) => {
     }
 
     // Ask the database for one confirmed overlapping reservation
-    const overlapping = await Reservation.findOne({
+    const overlapping = await Reservation.findOne({ // Check inside the same locked transaction.
       where: {
         listingId: parsedListingId,
         status: "CONFIRMED",
         startTime: {
-          [Op.lt]: end,
+          [Op.lt]: end, // Existing start is before the requested end.
         },
         endTime: {
-          [Op.gt]: start,
+          [Op.gt]: start, // Existing end is after the requested start.
         },
       },
       transaction,
@@ -302,9 +302,9 @@ router.post("/", requireAuth, async (req, res, next) => {
         transaction,
       },
     );
-    await transaction.commit();
-    const safeListing = listing.toJSON();
-    delete safeListing.imagePublicId;
+    await transaction.commit(); // Permanently save only after every booking check succeeds.
+    const safeListing = listing.toJSON(); // Use a plain response copy instead of mutating Sequelize data.
+    delete safeListing.imagePublicId; // Keep the backend's image-storage ID out of the response.
 
     return res.status(201).json({
       ...reservation.toJSON(),
@@ -323,12 +323,12 @@ router.post("/", requireAuth, async (req, res, next) => {
 router.get("/driver", requireAuth, async (req, res, next) => {
   try {
     const reservations = await Reservation.findAll({
-      where: { driverId: req.user.id },
+      where: { driverId: req.user.id }, // Never accept another driver's ID from the request.
       include: [
         {
           model: Listing,
           as: "listing",
-          attributes: [
+          attributes: [ // Explicit response allowlist for listing details.
             "id",
             "title",
             "neighborhood",
@@ -351,7 +351,7 @@ router.get("/driver", requireAuth, async (req, res, next) => {
 // PATCH cancel a reservation
 router.patch("/:id/cancel", requireAuth, async (req, res, next) => {
   try {
-    const parsedReservationId = Number(req.params.id);
+    const parsedReservationId = Number(req.params.id); // Normalize the URL parameter before querying.
 
     if (!Number.isInteger(parsedReservationId) || parsedReservationId <= 0) {
       return res.status(400).json({
@@ -365,7 +365,7 @@ router.patch("/:id/cancel", requireAuth, async (req, res, next) => {
       return res.status(404).json({ error: "Reservation not found" });
     }
 
-    if (reservation.driverId !== req.user.id) {
+    if (reservation.driverId !== req.user.id) { // Only the driver who booked it may cancel it.
       return res
         .status(403)
         .json({ error: "Only the driver who booked can cancel" });
@@ -380,7 +380,7 @@ router.patch("/:id/cancel", requireAuth, async (req, res, next) => {
         .json({ error: "Only future confirmed reservations can be cancelled" });
     }
 
-    reservation.status = "CANCELLED";
+    reservation.status = "CANCELLED"; // Preserve the record instead of deleting reservation history.
     await reservation.save();
 
     return res.status(200).json(reservation);
