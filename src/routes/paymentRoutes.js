@@ -1,4 +1,3 @@
-// src/routes/paymentRoutes.js
 const express = require("express");
 const router = express.Router();
 const { Op } = require("sequelize");
@@ -6,12 +5,10 @@ const Stripe = require("stripe");
 const { db, Listing, Reservation } = require("../models");
 const { vehicleCategories } = require("../models/Listing");
 const { requireAuth } = require("../middlewares/auth");
+const { evaluateVehicleFit } = require("../utils/domain");
 
 if (!process.env.STRIPE_SECRET_KEY) {
   throw new Error("STRIPE_SECRET_KEY is required.");
-}
-if (!process.env.STRIPE_WEBHOOK_SECRET) {
-  throw new Error("STRIPE_WEBHOOK_SECRET is required.");
 }
 if (!process.env.CLIENT_ORIGIN) {
   throw new Error("CLIENT_ORIGIN is required.");
@@ -19,7 +16,7 @@ if (!process.env.CLIENT_ORIGIN) {
 
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 const MIN_RESERVATION_MS = 30 * 60 * 1000;
-const HOLD_DURATION_MS = 30 * 60 * 1000; // matches Stripe Checkout's default 30-min session expiry
+const HOLD_DURATION_MS = 30 * 60 * 1000;
 
 router.post("/create-checkout-session", requireAuth, async (req, res, next) => {
   const { listingId, startTime, endTime, driverVehicleCategory, fitAcknowledged } = req.body;
@@ -79,10 +76,14 @@ router.post("/create-checkout-session", requireAuth, async (req, res, next) => {
       });
     }
 
-    const listingWantsSpecificFit = listing.maxVehicleCategory !== "OTHER_NOT_SURE";
-    const driverIsUncertain = driverVehicleCategory === "OTHER_NOT_SURE";
+    const fit = evaluateVehicleFit(listing.maxVehicleCategory, driverVehicleCategory);
 
-    if (listingWantsSpecificFit && driverIsUncertain && !fitAcknowledged) {
+    if (!fit.fits) {
+      await transaction.rollback();
+      return res.status(422).json({ error: "This vehicle is larger than the listing allows" });
+    }
+
+    if (fit.status === "ACK_REQUIRED" && !fitAcknowledged) {
       await transaction.rollback();
       return res.status(422).json({
         error: "You must acknowledge that the vehicle fit is uncertain",
@@ -91,7 +92,6 @@ router.post("/create-checkout-session", requireAuth, async (req, res, next) => {
 
     const now = new Date();
 
-    // Conflicts with CONFIRMED reservations, or still-live PENDING_PAYMENT holds
     const overlapping = await Reservation.findOne({
       where: {
         listingId: parsedListingId,
@@ -101,10 +101,7 @@ router.post("/create-checkout-session", requireAuth, async (req, res, next) => {
         ],
         [Op.or]: [
           { status: "CONFIRMED" },
-          {
-            status: "PENDING_PAYMENT",
-            holdExpiresAt: { [Op.gt]: now },
-          },
+          { status: "PENDING_PAYMENT", holdExpiresAt: { [Op.gt]: now } },
         ],
       },
       transaction,
@@ -118,8 +115,6 @@ router.post("/create-checkout-session", requireAuth, async (req, res, next) => {
 
     const durationHours = (end - start) / (1000 * 60 * 60);
     const totalPriceCents = Math.round(listing.hourlyPriceCents * durationHours);
-
-    // Hold the slot BEFORE creating the Stripe session
     const holdExpiresAt = new Date(Date.now() + HOLD_DURATION_MS);
 
     const reservation = await Reservation.create(
@@ -150,7 +145,7 @@ router.post("/create-checkout-session", requireAuth, async (req, res, next) => {
         },
       ],
       mode: "payment",
-      expires_at: Math.floor(holdExpiresAt.getTime() / 1000), // align Stripe's own expiry with our hold
+      expires_at: Math.floor(holdExpiresAt.getTime() / 1000),
       success_url: `${process.env.CLIENT_ORIGIN}/booking-success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${process.env.CLIENT_ORIGIN}/booking-cancelled`,
       metadata: {
