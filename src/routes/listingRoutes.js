@@ -1,150 +1,472 @@
-const { Op } = require("sequelize")
 const express = require("express");
-const router = express.Router();
+const { Op } = require("sequelize");
+
 const { Listing, Reservation, User } = require("../models");
 const { vehicleCategories } = require("../models/Listing");
 const { requireAuth, optionalAuth } = require("../middlewares/auth");
+const { evaluateVehicleFit, haversineMiles } = require("../utils/domain");
 
+const router = express.Router();
 
-function jitterCoordinate(value) {
-  // Adds up to ~0.005 degrees (~500m) of random offset to obscure the exact address
-  const OFFSET_RANGE = 0.005;
-  const offset = (Math.random() - 0.5) * 2 * OFFSET_RANGE;
-  return Math.round((value + offset) * 1e6) / 1e6; // 6 decimal places
-}
-const PUBLIC_LISTING_FIELDS = [
-  "id",
-  "title",
-  "description",
-  "neighborhood",
-  "city",
-  "state",
-  "zipCode",
-  "publicLatitude",
-  "publicLongitude",
-  "hourlyPriceCents",
-  "availableFrom",
-  "availableUntil",
-  "maxVehicleCategory",
-  "otherVehicleDescription",
-  "imageUrl",
-  "isActive",
-  "hostId",
-  "createdAt",
-  "updatedAt",
-];
+const MIN_INTERVAL_MS = 30 * 60 * 1000;
+const EXTERNAL_IMAGE_PUBLIC_ID = "external-image";
 
-function toPublicListing(listingInstance) {
-  const listing = listingInstance.toJSON();
-  const publicListing = Object.fromEntries(
-    PUBLIC_LISTING_FIELDS.map((field) => [field, listing[field]])
-  );
-
-  // Preserve the nested host association if it was included in the query
-  if (listing.host) {
-    publicListing.host = listing.host;
+function readRequiredText(value, fieldName, minimumLength, maximumLength) {
+  if (typeof value !== "string") {
+    return { error: `${fieldName} must be text` };
   }
 
-  return publicListing;
+  const cleanedValue = value.trim();
+
+  if (
+    cleanedValue.length < minimumLength ||
+    cleanedValue.length > maximumLength
+  ) {
+    return {
+      error: `${fieldName} must be ${minimumLength}-${maximumLength} characters`,
+    };
+  }
+
+  return { value: cleanedValue };
 }
 
-// Fields visible to the listing's own host — everything except imagePublicId
-function toOwnerListing(listingInstance) {
-  const listing = listingInstance.toJSON();
-  delete listing.imagePublicId;
-  return listing;
-}
+function readImageUrl(value) {
+  if (typeof value !== "string" || value.trim() === "") {
+    return { error: "imageUrl is required" };
+  }
 
-router.get("/", async (req, res, next) => {
+  const cleanedUrl = value.trim();
+
+  if (cleanedUrl.length > 2048) {
+    return { error: "imageUrl is too long" };
+  }
+
   try {
-    const {
-      startTime,
-      endTime,
-      minLat,
-      maxLat,
-      minLng,
-      maxLng,
-      vehicleCategory,
-      sort, // "distance" | "price"
-      lat, // viewer's location, needed if sort=distance
-      lng,
-    } = req.query;
+    const parsedUrl = new URL(cleanedUrl);
 
-    const where = { isActive: true };
-
-    if (minLat && maxLat) {
-      where.publicLatitude = { [Op.between]: [Number(minLat), Number(maxLat)] };
+    if (!["http:", "https:"].includes(parsedUrl.protocol)) {
+      return { error: "imageUrl must use http or https" };
     }
-    if (minLng && maxLng) {
-      where.publicLongitude = { [Op.between]: [Number(minLng), Number(maxLng)] };
-    }
+  } catch {
+    return { error: "imageUrl must be a valid URL" };
+  }
 
-    let start, end;
-    if (startTime && endTime) {
-      start = new Date(startTime);
-      end = new Date(endTime);
+  return { value: cleanedUrl };
+}
 
-      if (isNaN(start.getTime()) || isNaN(end.getTime()) || start >= end) {
-        return res.status(400).json({ error: "startTime and endTime are invalid" });
-      }
+function readNumber(value, fieldName, minimum, maximum) {
+  if (
+    value === undefined ||
+    value === null ||
+    value === "" ||
+    (typeof value === "string" && value.trim() === "")
+  ) {
+    return { error: `${fieldName} is required` };
+  }
 
-      where.availableFrom = { [Op.lte]: start };
-      where.availableUntil = { [Op.gte]: end };
-    }
+  const parsedValue = Number(value);
 
-    if (vehicleCategory) {
-      if (!vehicleCategories.includes(vehicleCategory)) {
-        return res.status(400).json({ error: "vehicleCategory is invalid" });
-      }
-      // Fit rule: listing accepts if maxVehicleCategory === requested OR listing is OTHER_NOT_SURE
-      where[Op.or] = [
-        { maxVehicleCategory: vehicleCategory },
-        { maxVehicleCategory: "OTHER_NOT_SURE" },
-      ];
-    }
+  if (!Number.isFinite(parsedValue) || parsedValue < minimum || parsedValue > maximum) {
+    return {
+      error: `${fieldName} must be between ${minimum} and ${maximum}`,
+    };
+  }
 
-    let listings = await Listing.findAll({ where });
+  return { value: parsedValue };
+}
 
-    // Exclude listings with a conflicting CONFIRMED or live PENDING_PAYMENT reservation
-    if (start && end) {
-      const now = new Date();
-      const listingIds = listings.map((l) => l.id);
+function readDate(value, fieldName) {
+  if (typeof value !== "string" || value.trim() === "") {
+    return { error: `${fieldName} is required` };
+  }
 
+  const parsedDate = new Date(value);
+
+  if (isNaN(parsedDate.getTime())) {
+    return { error: `${fieldName} must be a valid date` };
+  }
+
+  return { value: parsedDate };
+}
+
+function validateInterval(startTime, endTime, label) {
+  if (startTime >= endTime) {
+    return `${label} start must be before its end`;
+  }
+
+  if (endTime - startTime < MIN_INTERVAL_MS) {
+    return `${label} must be at least 30 minutes`;
+  }
+
+  return null;
+}
+
+function validateListingInput(body, coordinatesRequired) {
+  const title = readRequiredText(body.title, "title", 5, 100);
+  if (title.error) return { error: title.error };
+
+  const description = readRequiredText(body.description, "description", 20, 1200);
+  if (description.error) return { error: description.error };
+
+  const streetAddress = readRequiredText(
+    body.streetAddress,
+    "streetAddress",
+    5,
+    150,
+  );
+  if (streetAddress.error) return { error: streetAddress.error };
+
+  const neighborhood = readRequiredText(body.neighborhood, "neighborhood", 2, 80);
+  if (neighborhood.error) return { error: neighborhood.error };
+
+  const city = readRequiredText(body.city, "city", 2, 80);
+  if (city.error) return { error: city.error };
+
+  if (typeof body.state !== "string" || !/^[A-Za-z]{2}$/.test(body.state.trim())) {
+    return { error: "state must be a two-letter code" };
+  }
+
+  if (typeof body.zipCode !== "string" || !/^\d{5}$/.test(body.zipCode.trim())) {
+    return { error: "zipCode must be a 5-digit code" };
+  }
+
+  const hourlyPriceCents = Number(body.hourlyPriceCents);
+  if (
+    !Number.isInteger(hourlyPriceCents) ||
+    hourlyPriceCents < 100 ||
+    hourlyPriceCents > 100000
+  ) {
+    return {
+      error: "hourlyPriceCents must be an integer between 100 and 100000",
+    };
+  }
+
+  const availableFrom = readDate(body.availableFrom, "availableFrom");
+  if (availableFrom.error) return { error: availableFrom.error };
+
+  const availableUntil = readDate(body.availableUntil, "availableUntil");
+  if (availableUntil.error) return { error: availableUntil.error };
+
+  const intervalError = validateInterval(
+    availableFrom.value,
+    availableUntil.value,
+    "Availability window",
+  );
+  if (intervalError) return { error: intervalError };
+
+  if (!vehicleCategories.includes(body.maxVehicleCategory)) {
+    return { error: "maxVehicleCategory is invalid" };
+  }
+
+  let otherVehicleDescription = null;
+
+  if (body.maxVehicleCategory === "OTHER_NOT_SURE") {
+    const otherDescription = readRequiredText(
+      body.otherVehicleDescription,
+      "otherVehicleDescription",
+      1,
+      180,
+    );
+    if (otherDescription.error) return { error: otherDescription.error };
+    otherVehicleDescription = otherDescription.value;
+  } else if (
+    body.otherVehicleDescription !== undefined &&
+    body.otherVehicleDescription !== null &&
+    typeof body.otherVehicleDescription !== "string"
+  ) {
+    return { error: "otherVehicleDescription must be text" };
+  }
+
+  const instructions = readRequiredText(body.instructions, "instructions", 10, 800);
+  if (instructions.error) return { error: instructions.error };
+
+  const hasLatitude =
+    body.exactLatitude !== undefined &&
+    body.exactLatitude !== null &&
+    body.exactLatitude !== "";
+  const hasLongitude =
+    body.exactLongitude !== undefined &&
+    body.exactLongitude !== null &&
+    body.exactLongitude !== "";
+
+  if (hasLatitude !== hasLongitude) {
+    return { error: "exactLatitude and exactLongitude must be provided together" };
+  }
+
+  if (coordinatesRequired && !hasLatitude) {
+    return { error: "exactLatitude and exactLongitude are required" };
+  }
+
+  let coordinates = {};
+
+  if (hasLatitude) {
+    const exactLatitude = readNumber(body.exactLatitude, "exactLatitude", -90, 90);
+    if (exactLatitude.error) return { error: exactLatitude.error };
+
+    const exactLongitude = readNumber(
+      body.exactLongitude,
+      "exactLongitude",
+      -180,
+      180,
+    );
+    if (exactLongitude.error) return { error: exactLongitude.error };
+
+    // Public map coordinates are approximate; exact coordinates remain private.
+    coordinates = {
+      exactLatitude: exactLatitude.value,
+      exactLongitude: exactLongitude.value,
+      publicLatitude: Number(exactLatitude.value.toFixed(3)),
+      publicLongitude: Number(exactLongitude.value.toFixed(3)),
+    };
+  }
+
+  return {
+    value: {
+      title: title.value,
+      description: description.value,
+      streetAddress: streetAddress.value,
+      neighborhood: neighborhood.value,
+      city: city.value,
+      state: body.state.trim().toUpperCase(),
+      zipCode: body.zipCode.trim(),
+      hourlyPriceCents,
+      availableFrom: availableFrom.value,
+      availableUntil: availableUntil.value,
+      maxVehicleCategory: body.maxVehicleCategory,
+      otherVehicleDescription,
+      instructions: instructions.value,
+      ...coordinates,
+    },
+  };
+}
+
+function publicListing(listingInstance, fitStatus, distanceMiles) {
+  const listing = listingInstance.toJSON();
+
+  return {
+    id: listing.id,
+    title: listing.title,
+    description: listing.description,
+    neighborhood: listing.neighborhood,
+    city: listing.city,
+    state: listing.state,
+    zipCode: listing.zipCode,
+    publicLatitude: listing.publicLatitude,
+    publicLongitude: listing.publicLongitude,
+    hourlyPriceCents: listing.hourlyPriceCents,
+    availableFrom: listing.availableFrom,
+    availableUntil: listing.availableUntil,
+    maxVehicleCategory: listing.maxVehicleCategory,
+    otherVehicleDescription: listing.otherVehicleDescription,
+    imageUrl: listing.imageUrl,
+    isActive: listing.isActive,
+    host: listing.host
+      ? {
+          id: listing.host.id,
+          name: listing.host.name,
+        }
+      : undefined,
+    ...(fitStatus ? { fitStatus } : {}),
+    ...(distanceMiles !== undefined ? { distanceMiles } : {}),
+  };
+}
+
+function detailedListing(listingInstance, canSeePrivateFields) {
+  const listing = listingInstance.toJSON();
+
+  return {
+    ...publicListing(listingInstance),
+    ...(canSeePrivateFields
+      ? {
+          streetAddress: listing.streetAddress,
+          instructions: listing.instructions,
+          exactLatitude: listing.exactLatitude,
+          exactLongitude: listing.exactLongitude,
+        }
+      : {}),
+  };
+}
+
+// Search active listings that satisfy the requested map, time, and vehicle rules.
+router.get("/", optionalAuth, async (req, res, next) => {
+  const requiredQueryFields = [
+    "startTime",
+    "endTime",
+    "driverVehicleCategory",
+    "west",
+    "south",
+    "east",
+    "north",
+    "destinationLat",
+    "destinationLng",
+  ];
+
+  const missingField = requiredQueryFields.find(
+    (field) =>
+      req.query[field] === undefined ||
+      req.query[field] === null ||
+      req.query[field] === "",
+  );
+
+  if (missingField) {
+    return res.status(400).json({ error: `${missingField} is required` });
+  }
+
+  if (
+    req.query.location !== undefined &&
+    (typeof req.query.location !== "string" ||
+      req.query.location.trim().length < 2 ||
+      req.query.location.trim().length > 100)
+  ) {
+    return res.status(400).json({ error: "location must be 2-100 characters" });
+  }
+
+  if (!vehicleCategories.includes(req.query.driverVehicleCategory)) {
+    return res.status(400).json({ error: "driverVehicleCategory is invalid" });
+  }
+
+  const startTime = readDate(req.query.startTime, "startTime");
+  if (startTime.error) return res.status(400).json({ error: startTime.error });
+
+  const endTime = readDate(req.query.endTime, "endTime");
+  if (endTime.error) return res.status(400).json({ error: endTime.error });
+
+  const intervalError = validateInterval(
+    startTime.value,
+    endTime.value,
+    "Reservation",
+  );
+  if (intervalError) return res.status(400).json({ error: intervalError });
+
+  const west = readNumber(req.query.west, "west", -180, 180);
+  if (west.error) return res.status(400).json({ error: west.error });
+  const south = readNumber(req.query.south, "south", -90, 90);
+  if (south.error) return res.status(400).json({ error: south.error });
+  const east = readNumber(req.query.east, "east", -180, 180);
+  if (east.error) return res.status(400).json({ error: east.error });
+  const north = readNumber(req.query.north, "north", -90, 90);
+  if (north.error) return res.status(400).json({ error: north.error });
+  const destinationLat = readNumber(
+    req.query.destinationLat,
+    "destinationLat",
+    -90,
+    90,
+  );
+  if (destinationLat.error) {
+    return res.status(400).json({ error: destinationLat.error });
+  }
+  const destinationLng = readNumber(
+    req.query.destinationLng,
+    "destinationLng",
+    -180,
+    180,
+  );
+  if (destinationLng.error) {
+    return res.status(400).json({ error: destinationLng.error });
+  }
+
+  if (west.value >= east.value) {
+    return res.status(400).json({ error: "west must be less than east" });
+  }
+
+  if (south.value >= north.value) {
+    return res.status(400).json({ error: "south must be less than north" });
+  }
+
+  const sort = req.query.sort || "distance";
+
+  if (!["distance", "price"].includes(sort)) {
+    return res.status(400).json({ error: "sort must be distance or price" });
+  }
+
+  try {
+    const candidates = await Listing.findAll({
+      where: {
+        isActive: true,
+        publicLatitude: {
+          [Op.ne]: null,
+          [Op.between]: [south.value, north.value],
+        },
+        publicLongitude: {
+          [Op.ne]: null,
+          [Op.between]: [west.value, east.value],
+        },
+        availableFrom: { [Op.lte]: startTime.value },
+        availableUntil: { [Op.gte]: endTime.value },
+      },
+      include: [
+        {
+          model: User,
+          as: "host",
+          attributes: ["id", "name"],
+        },
+      ],
+      order: [["id", "ASC"]],
+      limit: 100,
+    });
+
+    let blockedListingIds = new Set();
+
+    if (candidates.length > 0) {
       const conflicts = await Reservation.findAll({
         where: {
-          listingId: { [Op.in]: listingIds },
-          [Op.and]: [{ startTime: { [Op.lt]: end } }, { endTime: { [Op.gt]: start } }],
-          [Op.or]: [
-            { status: "CONFIRMED" },
-            { status: "PENDING_PAYMENT", holdExpiresAt: { [Op.gt]: now } },
-          ],
+          listingId: { [Op.in]: candidates.map((listing) => listing.id) },
+          status: "CONFIRMED",
+          startTime: { [Op.lt]: endTime.value },
+          endTime: { [Op.gt]: startTime.value },
         },
         attributes: ["listingId"],
       });
 
-      const blockedIds = new Set(conflicts.map((r) => r.listingId));
-      listings = listings.filter((l) => !blockedIds.has(l.id));
+      blockedListingIds = new Set(
+        conflicts.map((reservation) => reservation.listingId),
+      );
     }
 
-    let items = listings.map(toPublicListing);
+    const matchingListings = candidates
+      .filter((listing) => !blockedListingIds.has(listing.id))
+      .map((listing) => {
+        const fit = evaluateVehicleFit(
+          listing.maxVehicleCategory,
+          req.query.driverVehicleCategory,
+        );
+        const distance = haversineMiles(
+          destinationLat.value,
+          destinationLng.value,
+          listing.publicLatitude,
+          listing.publicLongitude,
+        );
 
-    if (sort === "price") {
-      items.sort((a, b) => a.hourlyPriceCents - b.hourlyPriceCents);
-    } else if (sort === "distance" && lat && lng) {
-      const viewerLat = Number(lat);
-      const viewerLng = Number(lng);
-      items.sort((a, b) => {
-        const distA = Math.hypot(a.publicLatitude - viewerLat, a.publicLongitude - viewerLng);
-        const distB = Math.hypot(b.publicLatitude - viewerLat, b.publicLongitude - viewerLng);
-        return distA - distB;
-      });
-    }
+        return {
+          listing,
+          fit,
+          distanceMiles: Number(distance.toFixed(1)),
+        };
+      })
+      .filter(({ fit }) => fit.fits)
+      .sort((first, second) => {
+        if (sort === "price") {
+          return (
+            first.listing.hourlyPriceCents - second.listing.hourlyPriceCents ||
+            first.distanceMiles - second.distanceMiles
+          );
+        }
+
+        return (
+          first.distanceMiles - second.distanceMiles ||
+          first.listing.hourlyPriceCents - second.listing.hourlyPriceCents
+        );
+      })
+      .slice(0, 60)
+      .map(({ listing, fit, distanceMiles }) =>
+        publicListing(listing, fit.status, distanceMiles),
+      );
 
     return res.status(200).json({
-      items,
+      items: matchingListings,
       meta: {
-        count: items.length,
-        sort: sort === "price" ? "price" : "distance",
+        count: matchingListings.length,
+        sort,
       },
     });
   } catch (error) {
@@ -152,21 +474,26 @@ router.get("/", async (req, res, next) => {
   }
 });
 
-// GET a single listing by id
-// GET a single listing by id — private fields only for owner or a confirmed driver
+// Exact address details are limited to the owner or a confirmed driver.
 router.get("/:id", optionalAuth, async (req, res, next) => {
+  const listingId = Number(req.params.id);
+
+  if (!Number.isInteger(listingId) || listingId <= 0) {
+    return res.status(400).json({ error: "Listing id must be a positive integer" });
+  }
+
   try {
-    const parsedId = Number(req.params.id);
-
-    if (!Number.isInteger(parsedId) || parsedId <= 0) {
-      return res.status(400).json({ error: "Listing id must be a positive integer" });
-    }
-
-    const listing = await Listing.findByPk(parsedId, {
-      include: [{ model: User, as: "host", attributes: ["id", "name"] }],
+    const listing = await Listing.findByPk(listingId, {
+      include: [
+        {
+          model: User,
+          as: "host",
+          attributes: ["id", "name"],
+        },
+      ],
     });
 
-    if (!listing || !listing.isActive) {
+    if (!listing) {
       return res.status(404).json({ error: "Listing not found" });
     }
 
@@ -174,374 +501,188 @@ router.get("/:id", optionalAuth, async (req, res, next) => {
 
     if (req.user) {
       const isOwner = listing.hostId === req.user.id;
-
-      const hasConfirmedReservation = isOwner
-        ? false
+      const confirmedReservation = isOwner
+        ? null
         : await Reservation.findOne({
             where: {
-              listingId: parsedId,
+              listingId,
               driverId: req.user.id,
               status: "CONFIRMED",
             },
           });
 
-      canSeePrivateFields = isOwner || Boolean(hasConfirmedReservation);
+      canSeePrivateFields = isOwner || Boolean(confirmedReservation);
     }
 
-    const responseBody = canSeePrivateFields
-      ? toOwnerListing(listing)
-      : toPublicListing(listing);
-
-    return res.status(200).json(responseBody);
+    return res.status(200).json(detailedListing(listing, canSeePrivateFields));
   } catch (error) {
     return next(error);
   }
 });
 
-// POST create a new listing (host only)
+// Temporarily accept an image URL until direct photo uploads are added later.
 router.post("/", requireAuth, async (req, res, next) => {
-  const {
-    title,
-    description,
-    streetAddress,
-    neighborhood,
-    city,
-    state,
-    zipCode,
-    exactLatitude,
-    exactLongitude,
-    hourlyPriceCents,
-    availableFrom,
-    availableUntil,
-    maxVehicleCategory,
-    otherVehicleDescription,
-    instructions,
-    imageUrl,
-    imagePublicId,
-  } = req.body;
+  const validation = validateListingInput(req.body, true);
 
-  const requiredFields = {
-    title,
-    description,
-    streetAddress,
-    neighborhood,
-    city,
-    state,
-    zipCode,
-    hourlyPriceCents,
-    availableFrom,
-    availableUntil,
-    maxVehicleCategory,
-    instructions,
-    imageUrl,
-    imagePublicId,
-  };
-
-  const missingField = Object.entries(requiredFields).find(
-    ([, value]) => value === undefined || value === null || value === ""
-  );
-
-  if (missingField) {
-    return res.status(400).json({ error: `${missingField[0]} is required` });
+  if (validation.error) {
+    return res.status(400).json({ error: validation.error });
   }
 
-  if (typeof title !== "string" || title.trim().length === 0 || title.length > 100) {
-    return res.status(400).json({ error: "title must be 1-100 characters" });
-  }
+  const imageUrl = readImageUrl(req.body.imageUrl);
 
-  if (typeof state !== "string" || !/^[A-Z]{2}$/.test(state.trim())) {
-    return res.status(400).json({ error: "state must be a two-letter uppercase code" });
-  }
-
-  if (typeof zipCode !== "string" || !/^\d{5}$/.test(zipCode.trim())) {
-    return res.status(400).json({ error: "zipCode must be a 5-digit code" });
-  }
-
-  if (!vehicleCategories.includes(maxVehicleCategory)) {
-    return res.status(400).json({ error: "maxVehicleCategory is invalid" });
-  }
-
-  if (maxVehicleCategory === "OTHER_NOT_SURE" && !otherVehicleDescription) {
-    return res.status(400).json({
-      error: "otherVehicleDescription is required when maxVehicleCategory is OTHER_NOT_SURE",
-    });
-  }
-
-  if (!Number.isInteger(hourlyPriceCents) || hourlyPriceCents <= 0) {
-    return res.status(400).json({ error: "hourlyPriceCents must be a positive integer" });
-  }
-
-  if (typeof instructions !== "string" || instructions.trim().length === 0 || instructions.length > 1000) {
-    return res.status(400).json({ error: "instructions must be 1-1000 characters" });
-  }
-
-  const from = new Date(availableFrom);
-  const until = new Date(availableUntil);
-
-  if (isNaN(from.getTime()) || isNaN(until.getTime())) {
-    return res.status(400).json({ error: "availableFrom and availableUntil must be valid dates" });
-  }
-
-  if (until - from < 30 * 60 * 1000) {
-    return res.status(400).json({ error: "Availability window must be at least 30 minutes" });
-  }
-
-  if (exactLatitude === undefined || exactLongitude === undefined) {
-    return res.status(400).json({ error: "exactLatitude and exactLongitude are required" });
-  }
-
-  const lat = Number(exactLatitude);
-  const lng = Number(exactLongitude);
-
-  if (isNaN(lat) || lat < -90 || lat > 90) {
-    return res.status(400).json({ error: "exactLatitude must be between -90 and 90" });
-  }
-
-  if (isNaN(lng) || lng < -180 || lng > 180) {
-    return res.status(400).json({ error: "exactLongitude must be between -180 and 180" });
+  if (imageUrl.error) {
+    return res.status(400).json({ error: imageUrl.error });
   }
 
   try {
-    // Public coordinates are calculated by the backend, never accepted from the client.
-    // Placeholder: exact coordinates reused directly. Replace with real jitter/rounding
-    // logic once the team decides on a privacy-offset approach.
-    const publicLatitude = jitterCoordinate(lat);
-    const publicLongitude = jitterCoordinate(lng);
-
     const listing = await Listing.create({
+      ...validation.value,
+      imageUrl: imageUrl.value,
+      imagePublicId: EXTERNAL_IMAGE_PUBLIC_ID,
       hostId: req.user.id,
-      title: title.trim(),
-      description,
-      streetAddress: streetAddress.trim(),
-      neighborhood: neighborhood.trim(),
-      city: city.trim(),
-      state: state.trim().toUpperCase(),
-      zipCode: zipCode.trim(),
-      exactLatitude: lat,
-      exactLongitude: lng,
-      publicLatitude,
-      publicLongitude,
-      hourlyPriceCents,
-      availableFrom: from,
-      availableUntil: until,
-      maxVehicleCategory,
-      otherVehicleDescription: otherVehicleDescription ?? null,
-      instructions: instructions.trim(),
-      imageUrl,
-      imagePublicId,
       isActive: true,
     });
 
-    return res.status(201).json(toOwnerListing(listing));
+    return res.status(201).json(detailedListing(listing, true));
   } catch (error) {
     return next(error);
   }
 });
 
-// PATCH update a listing (owning host only)
+// Update listing information; photo replacement has its own route.
 router.patch("/:id", requireAuth, async (req, res, next) => {
+  const listingId = Number(req.params.id);
+
+  if (!Number.isInteger(listingId) || listingId <= 0) {
+    return res.status(400).json({ error: "Listing id must be a positive integer" });
+  }
+
   try {
-    const parsedId = Number(req.params.id);
-
-    if (!Number.isInteger(parsedId) || parsedId <= 0) {
-      return res.status(400).json({ error: "Listing id must be a positive integer" });
-    }
-
-    const listing = await Listing.findByPk(parsedId);
+    const listing = await Listing.findByPk(listingId);
 
     if (!listing) {
       return res.status(404).json({ error: "Listing not found" });
     }
 
     if (listing.hostId !== req.user.id) {
-      return res.status(403).json({ error: "Only the host who owns this listing can edit it" });
-    }
-
-    const {
-      title,
-      description,
-      streetAddress,
-      neighborhood,
-      city,
-      state,
-      zipCode,
-      exactLatitude,
-      exactLongitude,
-      hourlyPriceCents,
-      availableFrom,
-      availableUntil,
-      maxVehicleCategory,
-      otherVehicleDescription,
-      instructions,
-      imageUrl,
-      imagePublicId,
-    } = req.body;
-
-    if (maxVehicleCategory && !vehicleCategories.includes(maxVehicleCategory)) {
-      return res.status(400).json({ error: "maxVehicleCategory is invalid" });
-    }
-
-    if (
-      maxVehicleCategory === "OTHER_NOT_SURE" &&
-      !otherVehicleDescription &&
-      !listing.otherVehicleDescription
-    ) {
-      return res.status(400).json({
-        error: "otherVehicleDescription is required when maxVehicleCategory is OTHER_NOT_SURE",
+      return res.status(403).json({
+        error: "Only the host who owns this listing can edit it",
       });
     }
 
-    if (
-      hourlyPriceCents !== undefined &&
-      (!Number.isInteger(hourlyPriceCents) || hourlyPriceCents <= 0)
-    ) {
-      return res.status(400).json({ error: "hourlyPriceCents must be a positive integer" });
+    const addressChanged = ["streetAddress", "city", "state", "zipCode"].some(
+      (field) =>
+        String(req.body[field] ?? "").trim().toLowerCase() !==
+        String(listing[field]).trim().toLowerCase(),
+    );
+
+    const validation = validateListingInput(req.body, addressChanged);
+
+    if (validation.error) {
+      return res.status(400).json({ error: validation.error });
     }
 
-    let from = listing.availableFrom;
-    let until = listing.availableUntil;
+    const invalidatedReservation = await Reservation.findOne({
+      where: {
+        listingId,
+        status: "CONFIRMED",
+        endTime: { [Op.gt]: new Date() },
+        [Op.or]: [
+          { startTime: { [Op.lt]: validation.value.availableFrom } },
+          { endTime: { [Op.gt]: validation.value.availableUntil } },
+        ],
+      },
+    });
 
-    if (availableFrom !== undefined) from = new Date(availableFrom);
-    if (availableUntil !== undefined) until = new Date(availableUntil);
-
-    if (isNaN(from.getTime()) || isNaN(until.getTime())) {
-      return res.status(400).json({ error: "availableFrom and availableUntil must be valid dates" });
-    }
-
-    if (until - from < 30 * 60 * 1000) {
-      return res.status(400).json({ error: "Availability window must be at least 30 minutes" });
-    }
-
-    // Guard against shrinking availability to exclude an already-confirmed future reservation.
-    // NOTE: requires checking Reservation records tied to this listing — not yet implemented,
-    // flagged as a follow-up once the team confirms the exact rule.
-
-    const addressChanged =
-      streetAddress !== undefined ||
-      city !== undefined ||
-      state !== undefined ||
-      zipCode !== undefined;
-
-    if (addressChanged && (exactLatitude === undefined || exactLongitude === undefined)) {
-      return res.status(400).json({
-        error: "exactLatitude and exactLongitude are required when the address changes",
+    if (invalidatedReservation) {
+      return res.status(409).json({
+        error: "Availability cannot exclude an upcoming reservation",
       });
     }
 
-    let lat = listing.exactLatitude;
-    let lng = listing.exactLongitude;
+    const updatedValues = { ...validation.value };
 
-    if (exactLatitude !== undefined) {
-      lat = Number(exactLatitude);
-      if (isNaN(lat) || lat < -90 || lat > 90) {
-        return res.status(400).json({ error: "exactLatitude must be between -90 and 90" });
-      }
+    if (updatedValues.exactLatitude === undefined) {
+      updatedValues.exactLatitude = listing.exactLatitude;
+      updatedValues.exactLongitude = listing.exactLongitude;
+      updatedValues.publicLatitude = listing.publicLatitude;
+      updatedValues.publicLongitude = listing.publicLongitude;
     }
 
-    if (exactLongitude !== undefined) {
-      lng = Number(exactLongitude);
-      if (isNaN(lng) || lng < -180 || lng > 180) {
-        return res.status(400).json({ error: "exactLongitude must be between -180 and 180" });
-      }
-    }
+    await listing.update(updatedValues);
 
-    listing.title = title !== undefined ? title.trim() : listing.title;
-    listing.description = description ?? listing.description;
-    listing.streetAddress = streetAddress !== undefined ? streetAddress.trim() : listing.streetAddress;
-    listing.neighborhood = neighborhood !== undefined ? neighborhood.trim() : listing.neighborhood;
-    listing.city = city !== undefined ? city.trim() : listing.city;
-    listing.state = state !== undefined ? state.trim().toUpperCase() : listing.state;
-    listing.zipCode = zipCode !== undefined ? zipCode.trim() : listing.zipCode;
-    listing.exactLatitude = lat;
-    listing.exactLongitude = lng;
-    listing.publicLatitude = jitterCoordinate(lat);
-    listing.publicLongitude = jitterCoordinate(lng);
-    listing.hourlyPriceCents = hourlyPriceCents ?? listing.hourlyPriceCents;
-    listing.availableFrom = from;
-    listing.availableUntil = until;
-    listing.maxVehicleCategory = maxVehicleCategory ?? listing.maxVehicleCategory;
-    listing.otherVehicleDescription = otherVehicleDescription ?? listing.otherVehicleDescription;
-    listing.instructions = instructions !== undefined ? instructions.trim() : listing.instructions;
-    listing.imageUrl = imageUrl ?? listing.imageUrl;
-    listing.imagePublicId = imagePublicId ?? listing.imagePublicId;
-
-    await listing.save();
-
-    return res.status(200).json(toOwnerListing(listing));
+    return res.status(200).json(detailedListing(listing, true));
   } catch (error) {
     return next(error);
   }
 });
 
-// PATCH toggle active status — deactivate or reactivate (owning host only)
+// Activate or deactivate a listing without changing its other information.
 router.patch("/:id/status", requireAuth, async (req, res, next) => {
+  const listingId = Number(req.params.id);
+
+  if (!Number.isInteger(listingId) || listingId <= 0) {
+    return res.status(400).json({ error: "Listing id must be a positive integer" });
+  }
+
+  if (typeof req.body.isActive !== "boolean") {
+    return res.status(400).json({ error: "isActive must be true or false" });
+  }
+
   try {
-    const parsedId = Number(req.params.id);
-
-    if (!Number.isInteger(parsedId) || parsedId <= 0) {
-      return res.status(400).json({ error: "Listing id must be a positive integer" });
-    }
-
-    const listing = await Listing.findByPk(parsedId);
+    const listing = await Listing.findByPk(listingId);
 
     if (!listing) {
       return res.status(404).json({ error: "Listing not found" });
     }
 
     if (listing.hostId !== req.user.id) {
-      return res.status(403).json({ error: "Only the host who owns this listing can change its status" });
+      return res.status(403).json({
+        error: "Only the host who owns this listing can change its status",
+      });
     }
 
-    const { isActive } = req.body;
-
-    if (typeof isActive !== "boolean") {
-      return res.status(400).json({ error: "isActive must be a boolean" });
-    }
-
-    listing.isActive = isActive;
+    listing.isActive = req.body.isActive;
     await listing.save();
 
-    return res.status(200).json(toOwnerListing(listing));
+    return res.status(200).json(detailedListing(listing, true));
   } catch (error) {
     return next(error);
   }
 });
 
-// POST /:id/photo — placeholder for photo replacement (owning host only)
-// NOTE: needs to integrate with the team's image-upload service once decided.
-// This currently only accepts an already-uploaded imageUrl/imagePublicId pair
-// rather than handling the upload itself.
+// Temporarily replace a photo URL until direct photo uploads are added later.
 router.post("/:id/photo", requireAuth, async (req, res, next) => {
+  const listingId = Number(req.params.id);
+
+  if (!Number.isInteger(listingId) || listingId <= 0) {
+    return res.status(400).json({ error: "Listing id must be a positive integer" });
+  }
+
   try {
-    const parsedId = Number(req.params.id);
-
-    if (!Number.isInteger(parsedId) || parsedId <= 0) {
-      return res.status(400).json({ error: "Listing id must be a positive integer" });
-    }
-
-    const listing = await Listing.findByPk(parsedId);
+    const listing = await Listing.findByPk(listingId);
 
     if (!listing) {
       return res.status(404).json({ error: "Listing not found" });
     }
 
     if (listing.hostId !== req.user.id) {
-      return res.status(403).json({ error: "Only the host who owns this listing can update its photo" });
+      return res.status(403).json({
+        error: "Only the host who owns this listing can update its photo",
+      });
     }
 
-    const { imageUrl, imagePublicId } = req.body;
+    const imageUrl = readImageUrl(req.body.imageUrl);
 
-    if (!imageUrl || !imagePublicId) {
-      return res.status(400).json({ error: "imageUrl and imagePublicId are required" });
+    if (imageUrl.error) {
+      return res.status(400).json({ error: imageUrl.error });
     }
 
-    // NOTE: old image cleanup (deleting the previous Cloudinary asset) is not
-    // implemented here — needs the image-upload service's delete method.
-    listing.imageUrl = imageUrl;
-    listing.imagePublicId = imagePublicId;
+    listing.imageUrl = imageUrl.value;
+    listing.imagePublicId = EXTERNAL_IMAGE_PUBLIC_ID;
     await listing.save();
 
-    return res.status(200).json(toOwnerListing(listing));
+    return res.status(200).json(detailedListing(listing, true));
   } catch (error) {
     return next(error);
   }

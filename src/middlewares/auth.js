@@ -114,8 +114,8 @@ async function optionalAuth(request, response, next) {
       attributes: { exclude: ["passwordHash"] },
     });
     request.user = user || null;
-  } catch {
-    request.user = null; // fail safe — don't block the request over a lookup error
+  } catch (error) {
+    return next(error);
   }
 
   return next();
