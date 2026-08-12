@@ -9,14 +9,14 @@ const hostRouter = require("./routes/hostRoutes");
 const paymentRouter = require("./routes/paymentRoutes");
 const errorHandler = require("./middlewares/errorHandler");
 const listingRouter = require("./routes/listingRoutes");
-
+const webhookRouter = require("./routes/webhookRoutes");
 const app = express();
 const PORT = Number(process.env.PORT) || 5050;
 
 const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || "http://localhost:5173";
 
 app.use(cors({ origin: CLIENT_ORIGIN, credentials: true }));
-
+app.use("/webhook", webhookRouter); 
 app.use(express.json());
 app.use(cookieParser());
 app.use("/api/reservations", reservationRouter);   // ← ADDED

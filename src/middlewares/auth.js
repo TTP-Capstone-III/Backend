@@ -93,8 +93,37 @@ async function requireAuth(request, response, next) {
   return next();
 }
 
+async function optionalAuth(request, response, next) {
+  const token = request.cookies?.[COOKIE_NAME];
+
+  if (!token) {
+    request.user = null;
+    return next();
+  }
+
+  let payload;
+  try {
+    payload = jwt.verify(token, process.env.JWT_SECRET);
+  } catch {
+    request.user = null; // invalid/expired token — treat as logged out, don't error
+    return next();
+  }
+
+  try {
+    const user = await User.findByPk(payload.sub, {
+      attributes: { exclude: ["passwordHash"] },
+    });
+    request.user = user || null;
+  } catch {
+    request.user = null; // fail safe — don't block the request over a lookup error
+  }
+
+  return next();
+}
+
 module.exports = {
   setSession,
   clearSession,
   requireAuth,
+  optionalAuth,
 };
