@@ -6,6 +6,8 @@ const { db } = require("./models");
 const authRouter = require("./routes/authRoute");
 const reservationRouter = require("./routes/reservationRoutes");
 const hostRouter = require("./routes/hostRoutes");
+const listingRouter = require("./routes/listingRoutes");
+// Payment and webhook routes stay disabled until the payment workflow is finalized.
 const errorHandler = require("./middlewares/errorHandler");
 
 const app = express();
@@ -21,6 +23,7 @@ app.use(cookieParser());
 app.use("/api/auth", authRouter);
 app.use("/api/reservations", reservationRouter);
 app.use("/api/host", hostRouter);
+app.use("/api/listings", listingRouter); // Adds /api/listings before every route in listingRoutes.js.
 
 app.get("/api/health", (_request, response) => {
   response.json({ status: "ok" });
