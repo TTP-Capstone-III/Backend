@@ -8,9 +8,10 @@ const { evaluateVehicleFit, haversineMiles } = require("../utils/domain");
 
 const router = express.Router();
 
-const MIN_INTERVAL_MS = 30 * 60 * 1000;
-const EXTERNAL_IMAGE_PUBLIC_ID = "external-image";
+const MIN_INTERVAL_MS = 30 * 60 * 1000; // Listing and search intervals must be at least 30 minutes.
+const EXTERNAL_IMAGE_PUBLIC_ID = "external-image"; // Temporary value until image uploads are added.
 
+// Validate required text and return its trimmed value.
 function readRequiredText(value, fieldName, minimumLength, maximumLength) {
   if (typeof value !== "string") {
     return { error: `${fieldName} must be text` };
@@ -30,6 +31,7 @@ function readRequiredText(value, fieldName, minimumLength, maximumLength) {
   return { value: cleanedValue };
 }
 
+// Accept only a usable HTTP or HTTPS image URL.
 function readImageUrl(value) {
   if (typeof value !== "string" || value.trim() === "") {
     return { error: "imageUrl is required" };
@@ -54,6 +56,7 @@ function readImageUrl(value) {
   return { value: cleanedUrl };
 }
 
+// Convert request input to a number and enforce its allowed range.
 function readNumber(value, fieldName, minimum, maximum) {
   if (
     value === undefined ||
@@ -75,6 +78,7 @@ function readNumber(value, fieldName, minimum, maximum) {
   return { value: parsedValue };
 }
 
+// Convert request text into a valid JavaScript Date.
 function readDate(value, fieldName) {
   if (typeof value !== "string" || value.trim() === "") {
     return { error: `${fieldName} is required` };
@@ -89,6 +93,7 @@ function readDate(value, fieldName) {
   return { value: parsedDate };
 }
 
+// Make sure the end is later and the interval is long enough.
 function validateInterval(startTime, endTime, label) {
   if (startTime >= endTime) {
     return `${label} start must be before its end`;
@@ -101,6 +106,7 @@ function validateInterval(startTime, endTime, label) {
   return null;
 }
 
+// Validate and normalize the fields used to create or update a listing.
 function validateListingInput(body, coordinatesRequired) {
   const title = readRequiredText(body.title, "title", 5, 100);
   if (title.error) return { error: title.error };
@@ -240,6 +246,7 @@ function validateListingInput(body, coordinatesRequired) {
   };
 }
 
+// Return only fields that are safe for public search results.
 function publicListing(listingInstance, fitStatus, distanceMiles) {
   const listing = listingInstance.toJSON();
 
@@ -271,6 +278,7 @@ function publicListing(listingInstance, fitStatus, distanceMiles) {
   };
 }
 
+// Add the exact address only when the requester is allowed to see it.
 function detailedListing(listingInstance, canSeePrivateFields) {
   const listing = listingInstance.toJSON();
 
@@ -289,6 +297,7 @@ function detailedListing(listingInstance, canSeePrivateFields) {
 
 // Search active listings that satisfy the requested map, time, and vehicle rules.
 router.get("/", optionalAuth, async (req, res, next) => {
+  // Express puts the values after the URL's ? inside req.query.
   const requiredQueryFields = [
     "startTime",
     "endTime",
@@ -301,6 +310,7 @@ router.get("/", optionalAuth, async (req, res, next) => {
     "destinationLng",
   ];
 
+  // Stop at the first search value the frontend or Postman did not provide.
   const missingField = requiredQueryFields.find(
     (field) =>
       req.query[field] === undefined ||
@@ -325,6 +335,7 @@ router.get("/", optionalAuth, async (req, res, next) => {
     return res.status(400).json({ error: "driverVehicleCategory is invalid" });
   }
 
+  // Query parameters arrive as strings, so validate and convert the dates and numbers.
   const startTime = readDate(req.query.startTime, "startTime");
   if (startTime.error) return res.status(400).json({ error: startTime.error });
 
@@ -373,6 +384,7 @@ router.get("/", optionalAuth, async (req, res, next) => {
     return res.status(400).json({ error: "south must be less than north" });
   }
 
+  // Use distance when the request does not provide a sort option.
   const sort = req.query.sort || "distance";
 
   if (!["distance", "price"].includes(sort)) {
@@ -380,6 +392,7 @@ router.get("/", optionalAuth, async (req, res, next) => {
   }
 
   try {
+    // First find active listings inside the map and requested availability window.
     const candidates = await Listing.findAll({
       where: {
         isActive: true,
@@ -405,6 +418,7 @@ router.get("/", optionalAuth, async (req, res, next) => {
       limit: 100,
     });
 
+    // A Set lets us quickly exclude listings that already have a conflicting booking.
     let blockedListingIds = new Set();
 
     if (candidates.length > 0) {
@@ -424,8 +438,10 @@ router.get("/", optionalAuth, async (req, res, next) => {
     }
 
     const matchingListings = candidates
+      // Remove spaces that are already reserved during the requested time.
       .filter((listing) => !blockedListingIds.has(listing.id))
       .map((listing) => {
+        // Check whether the driver's vehicle fits and calculate distance from the destination.
         const fit = evaluateVehicleFit(
           listing.maxVehicleCategory,
           req.query.driverVehicleCategory,
@@ -443,6 +459,7 @@ router.get("/", optionalAuth, async (req, res, next) => {
           distanceMiles: Number(distance.toFixed(1)),
         };
       })
+      // Do not show listings that are too small for the driver's vehicle.
       .filter(({ fit }) => fit.fits)
       .sort((first, second) => {
         if (sort === "price") {
@@ -457,11 +474,12 @@ router.get("/", optionalAuth, async (req, res, next) => {
           first.listing.hourlyPriceCents - second.listing.hourlyPriceCents
         );
       })
-      .slice(0, 60)
+      .slice(0, 60) // Limit the final response after sorting.
       .map(({ listing, fit, distanceMiles }) =>
         publicListing(listing, fit.status, distanceMiles),
       );
 
+    // matchingListings becomes items; meta describes the result count and sorting.
     return res.status(200).json({
       items: matchingListings,
       meta: {
@@ -500,6 +518,7 @@ router.get("/:id", optionalAuth, async (req, res, next) => {
     let canSeePrivateFields = false;
 
     if (req.user) {
+      // Only the owner or a confirmed driver can receive the exact parking location.
       const isOwner = listing.hostId === req.user.id;
       const confirmedReservation = isOwner
         ? null
@@ -539,7 +558,7 @@ router.post("/", requireAuth, async (req, res, next) => {
       ...validation.value,
       imageUrl: imageUrl.value,
       imagePublicId: EXTERNAL_IMAGE_PUBLIC_ID,
-      hostId: req.user.id,
+      hostId: req.user.id, // Trust the authenticated user instead of a body-supplied host ID.
       isActive: true,
     });
 
@@ -570,6 +589,7 @@ router.patch("/:id", requireAuth, async (req, res, next) => {
       });
     }
 
+    // New coordinates are required when the address changes.
     const addressChanged = ["streetAddress", "city", "state", "zipCode"].some(
       (field) =>
         String(req.body[field] ?? "").trim().toLowerCase() !==
@@ -582,6 +602,7 @@ router.patch("/:id", requireAuth, async (req, res, next) => {
       return res.status(400).json({ error: validation.error });
     }
 
+    // Protect upcoming reservations from being moved outside the new availability window.
     const invalidatedReservation = await Reservation.findOne({
       where: {
         listingId,
@@ -602,6 +623,7 @@ router.patch("/:id", requireAuth, async (req, res, next) => {
 
     const updatedValues = { ...validation.value };
 
+    // Keep the old coordinates when an unchanged address does not resend them.
     if (updatedValues.exactLatitude === undefined) {
       updatedValues.exactLatitude = listing.exactLatitude;
       updatedValues.exactLongitude = listing.exactLongitude;

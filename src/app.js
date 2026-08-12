@@ -23,7 +23,7 @@ app.use(cookieParser());
 app.use("/api/auth", authRouter);
 app.use("/api/reservations", reservationRouter);
 app.use("/api/host", hostRouter);
-app.use("/api/listings", listingRouter);
+app.use("/api/listings", listingRouter); // Adds /api/listings before every route in listingRoutes.js.
 
 app.get("/api/health", (_request, response) => {
   response.json({ status: "ok" });

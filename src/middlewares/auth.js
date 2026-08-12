@@ -93,6 +93,7 @@ async function requireAuth(request, response, next) {
   return next();
 }
 
+// Identify a logged-in user when possible, but allow public requests to continue.
 async function optionalAuth(request, response, next) {
   const token = request.cookies?.[COOKIE_NAME];
 
