@@ -33,8 +33,29 @@ function calculatePrice(hourlyPriceCents, startTime, endTime) {
   };
 }
 
+// Calculate real map distance instead of comparing latitude/longitude as flat coordinates.
+function haversineMiles(latitudeA, longitudeA, latitudeB, longitudeB) {
+  const toRadians = (degrees) => (degrees * Math.PI) / 180;
+  const earthRadiusMiles = 3958.8;
+  const latitudeDelta = toRadians(latitudeB - latitudeA);
+  const longitudeDelta = toRadians(longitudeB - longitudeA);
+
+  const distanceFormula =
+    Math.sin(latitudeDelta / 2) ** 2 +
+    Math.cos(toRadians(latitudeA)) *
+      Math.cos(toRadians(latitudeB)) *
+      Math.sin(longitudeDelta / 2) ** 2;
+
+  return (
+    earthRadiusMiles *
+    2 *
+    Math.atan2(Math.sqrt(distanceFormula), Math.sqrt(1 - distanceFormula))
+  );
+}
+
 module.exports = {
   VEHICLE_RANK,
   evaluateVehicleFit,
   calculatePrice,
+  haversineMiles,
 };
