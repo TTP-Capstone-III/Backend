@@ -713,4 +713,43 @@ router.post("/:id/photo", requireAuth, async (req, res, next) => {
   }
 });
 
+// Permanently delete a listing (owning host only). Blocked if any reservation exists.
+router.delete("/:id", requireAuth, async (req, res, next) => {
+  const listingId = Number(req.params.id);
+
+  if (!Number.isInteger(listingId) || listingId <= 0) {
+    return res.status(400).json({ error: "Listing id must be a positive integer" });
+  }
+
+  try {
+    const listing = await Listing.findByPk(listingId);
+
+    if (!listing) {
+      return res.status(404).json({ error: "Listing not found" });
+    }
+
+    if (listing.hostId !== req.user.id) {
+      return res.status(403).json({
+        error: "Only the host who owns this listing can delete it",
+      });
+    }
+
+    const existingReservation = await Reservation.findOne({
+      where: { listingId },
+    });
+
+    if (existingReservation) {
+      return res.status(409).json({
+        error: "This listing has reservation history and cannot be deleted. Deactivate it instead.",
+      });
+    }
+
+    await listing.destroy();
+
+    return res.status(204).send();
+  } catch (error) {
+    return next(error);
+  }
+});
+
 module.exports = router;

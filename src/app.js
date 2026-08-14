@@ -7,6 +7,7 @@ const authRouter = require("./routes/authRoute");
 const reservationRouter = require("./routes/reservationRoutes");
 const hostRouter = require("./routes/hostRoutes");
 const listingRouter = require("./routes/listingRoutes");
+const paymentRouter = require("./routes/paymentRoutes");
 
 const webhookRouter = require("./routes/webhook");
 
