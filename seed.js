@@ -4,7 +4,7 @@ const { db, User, Listing, Reservation } = require("./src/models");
 async function seed() {
   try {
     console.log("Syncing database...");
-    await db.sync({ force: true }); // WARNING: drops and recreates all tables
+    await db.sync({ force: false });
 
     console.log("Seeding users...");
     const passwordHash = await bcrypt.hash("password123", 12);
