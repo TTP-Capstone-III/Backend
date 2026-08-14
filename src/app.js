@@ -6,24 +6,37 @@ const { db } = require("./models");
 const authRouter = require("./routes/authRoute");
 const reservationRouter = require("./routes/reservationRoutes");
 const hostRouter = require("./routes/hostRoutes");
-const paymentRouter = require("./routes/paymentRoutes");
-const errorHandler = require("./middlewares/errorHandler");
 const listingRouter = require("./routes/listingRoutes");
+
 const webhookRouter = require("./routes/webhook");
+
+// Payment and webhook routes stay disabled until the payment workflow is finalized.
+const errorHandler = require("./middlewares/errorHandler");
+
+
 const app = express();
 const PORT = Number(process.env.PORT) || 5050;
 
 const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || "http://localhost:5173";
 
 app.use(cors({ origin: CLIENT_ORIGIN, credentials: true }));
+
 app.use("/api/webhooks", webhookRouter); 
+
+
+
 app.use(express.json());
 app.use(cookieParser());
-app.use("/api/reservations", reservationRouter);   // ← ADDED
-app.use("/api/host", hostRouter);  
+
 app.use("/api/auth", authRouter);
+
 app.use("/api/listings", listingRouter);
 app.use("/api/payments", paymentRouter);
+
+app.use("/api/reservations", reservationRouter);
+app.use("/api/host", hostRouter);
+app.use("/api/listings", listingRouter); // Adds /api/listings before every route in listingRoutes.js.
+
 
 app.get("/api/health", (_request, response) => {
   response.json({ status: "ok" });

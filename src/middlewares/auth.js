@@ -93,6 +93,7 @@ async function requireAuth(request, response, next) {
   return next();
 }
 
+// Identify a logged-in user when possible, but allow public requests to continue.
 async function optionalAuth(request, response, next) {
   const token = request.cookies?.[COOKIE_NAME];
 
@@ -114,8 +115,8 @@ async function optionalAuth(request, response, next) {
       attributes: { exclude: ["passwordHash"] },
     });
     request.user = user || null;
-  } catch {
-    request.user = null; // fail safe — don't block the request over a lookup error
+  } catch (error) {
+    return next(error);
   }
 
   return next();

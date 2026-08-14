@@ -1,4 +1,3 @@
-// src/models/Reservation.js
 const { DataTypes } = require("sequelize");
 const db = require("../db");
 const { vehicleCategories } = require("./Listing");
@@ -6,32 +5,42 @@ const { vehicleCategories } = require("./Listing");
 const Reservation = db.define(
   "Reservation",
   {
-    listingId: { type: DataTypes.INTEGER, allowNull: false },
-    driverId: { type: DataTypes.INTEGER, allowNull: false },
-    startTime: { type: DataTypes.DATE, allowNull: false },
-    endTime: { type: DataTypes.DATE, allowNull: false },
+    listingId: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+    },
+    driverId: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+    },
+    startTime: {
+      type: DataTypes.DATE,
+      allowNull: false,
+    },
+    endTime: {
+      type: DataTypes.DATE,
+      allowNull: false,
+    },
     driverVehicleCategory: {
       type: DataTypes.ENUM(...vehicleCategories),
       allowNull: false,
     },
-    fitAcknowledged: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
-    totalPriceCents: { type: DataTypes.INTEGER, allowNull: false, validate: { min: 0 } },
-    status: {
-      // ADDED: PENDING_PAYMENT — holds the slot while Stripe Checkout is open
-      type: DataTypes.ENUM("PENDING_PAYMENT", "CONFIRMED", "CANCELLED", "EXPIRED"),
+    fitAcknowledged: {
+      type: DataTypes.BOOLEAN,
       allowNull: false,
-      defaultValue: "PENDING_PAYMENT",
+      defaultValue: false,
     },
-    stripeCheckoutSessionId: {
-      // ADDED: needed for webhook to find the reservation by session id
-      type: DataTypes.STRING,
-      allowNull: true,
-      unique: true,
+    totalPriceCents: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+      validate: {
+        min: 0,
+      },
     },
-    holdExpiresAt: {
-      // ADDED: used to release abandoned PENDING_PAYMENT holds
-      type: DataTypes.DATE,
-      allowNull: true,
+    status: {
+      type: DataTypes.ENUM("CONFIRMED", "CANCELLED"),
+      allowNull: false,
+      defaultValue: "CONFIRMED",
     },
   },
   {
@@ -40,7 +49,6 @@ const Reservation = db.define(
     indexes: [
       { fields: ["listingId", "startTime", "endTime"] },
       { fields: ["driverId"] },
-      { fields: ["stripeCheckoutSessionId"] },
     ],
   },
 );
