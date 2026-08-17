@@ -850,6 +850,49 @@ async function seed() {
       status: "CONFIRMED",
     });
 
+    await Reservation.bulkCreate([
+      {
+        listingId: listing4.id,
+        driverId: driver2.id,
+        startTime: new Date("2026-08-22T14:00:00Z"),
+        endTime: new Date("2026-08-22T17:00:00Z"),
+        driverVehicleCategory: "COMPACT",
+        fitAcknowledged: false,
+        totalPriceCents: 5400,
+        status: "CONFIRMED",
+      },
+      {
+        listingId: listing6.id,
+        driverId: driver2.id,
+        startTime: new Date("2026-08-25T12:00:00Z"),
+        endTime: new Date("2026-08-25T15:00:00Z"),
+        driverVehicleCategory: "COMPACT",
+        fitAcknowledged: false,
+        totalPriceCents: 3600,
+        status: "CONFIRMED",
+      },
+      {
+        listingId: listing5.id,
+        driverId: driver2.id,
+        startTime: new Date("2026-08-10T15:00:00Z"),
+        endTime: new Date("2026-08-10T18:00:00Z"),
+        driverVehicleCategory: "SEDAN",
+        fitAcknowledged: false,
+        totalPriceCents: 4200,
+        status: "CONFIRMED",
+      },
+      {
+        listingId: listing2.id,
+        driverId: driver2.id,
+        startTime: new Date("2026-08-12T10:00:00Z"),
+        endTime: new Date("2026-08-12T12:00:00Z"),
+        driverVehicleCategory: "COMPACT",
+        fitAcknowledged: false,
+        totalPriceCents: 1100,
+        status: "CANCELLED",
+      },
+    ]);
+
     console.log("Seed complete ✅");
     process.exit(0);
   } catch (error) {
