@@ -1,22 +1,16 @@
 const express = require("express");
 const router = express.Router();
-const { Op } = require("sequelize");
 const Stripe = require("stripe");
 const { db, Listing, Reservation } = require("../models");
 const { vehicleCategories } = require("../models/Listing");
+const { evaluateVehicleFit, calculatePrice } = require("../utils/domain");
 const { requireAuth } = require("../middlewares/auth");
-const { evaluateVehicleFit } = require("../utils/domain");
-
-if (!process.env.STRIPE_SECRET_KEY) {
-  throw new Error("STRIPE_SECRET_KEY is required.");
-}
-if (!process.env.CLIENT_ORIGIN) {
-  throw new Error("CLIENT_ORIGIN is required.");
-}
+const { activeConflictWhere } = require("./reservationRoutes");
 
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
+
 const MIN_RESERVATION_MS = 30 * 60 * 1000;
-const HOLD_DURATION_MS = 30 * 60 * 1000;
+const HOLD_DURATION_MS = 35 * 60 * 1000;
 
 router.post("/create-checkout-session", requireAuth, async (req, res, next) => {
   const { listingId, startTime, endTime, driverVehicleCategory, fitAcknowledged } = req.body;
@@ -32,6 +26,12 @@ router.post("/create-checkout-session", requireAuth, async (req, res, next) => {
   }
 
   const parsedListingId = Number(listingId);
+  const acknowledgedFit = fitAcknowledged ?? false;
+
+  if (typeof acknowledgedFit !== "boolean") {
+    return res.status(400).json({ error: "fitAcknowledged must be true or false" });
+  }
+
   if (!Number.isInteger(parsedListingId) || parsedListingId <= 0) {
     return res.status(400).json({ error: "listingId must be a positive integer" });
   }
@@ -49,6 +49,7 @@ router.post("/create-checkout-session", requireAuth, async (req, res, next) => {
     return res.status(400).json({ error: "Reservation must be at least 30 minutes" });
   }
 
+  let reservation;
   let transaction;
 
   try {
@@ -63,12 +64,10 @@ router.post("/create-checkout-session", requireAuth, async (req, res, next) => {
       await transaction.rollback();
       return res.status(409).json({ error: "This listing is not currently active" });
     }
-
     if (listing.hostId === req.user.id) {
       await transaction.rollback();
       return res.status(400).json({ error: "You cannot book your own listing" });
     }
-
     if (start < listing.availableFrom || end > listing.availableUntil) {
       await transaction.rollback();
       return res.status(409).json({
@@ -82,55 +81,43 @@ router.post("/create-checkout-session", requireAuth, async (req, res, next) => {
       await transaction.rollback();
       return res.status(422).json({ error: "This vehicle is larger than the listing allows" });
     }
-
-    if (fit.status === "ACK_REQUIRED" && !fitAcknowledged) {
+    if (fit.status === "ACK_REQUIRED" && !acknowledgedFit) {
       await transaction.rollback();
       return res.status(422).json({
         error: "You must acknowledge that the vehicle fit is uncertain",
       });
     }
 
-    const now = new Date();
-
-    const overlapping = await Reservation.findOne({
-      where: {
-        listingId: parsedListingId,
-        [Op.and]: [
-          { startTime: { [Op.lt]: end } },
-          { endTime: { [Op.gt]: start } },
-        ],
-        [Op.or]: [
-          { status: "CONFIRMED" },
-          { status: "PENDING_PAYMENT", holdExpiresAt: { [Op.gt]: now } },
-        ],
-      },
+    const conflict = await Reservation.findOne({
+      where: activeConflictWhere(parsedListingId, start, end),
       transaction,
       lock: transaction.LOCK.UPDATE,
     });
 
-    if (overlapping) {
+    if (conflict) {
       await transaction.rollback();
       return res.status(409).json({ error: "This time slot is already booked" });
     }
 
-    const durationHours = (end - start) / (1000 * 60 * 60);
-    const totalPriceCents = Math.round(listing.hourlyPriceCents * durationHours);
+    const { totalPriceCents } = calculatePrice(listing.hourlyPriceCents, start, end);
     const holdExpiresAt = new Date(Date.now() + HOLD_DURATION_MS);
 
-    const reservation = await Reservation.create(
+    reservation = await Reservation.create(
       {
         listingId: parsedListingId,
         driverId: req.user.id,
         startTime: start,
         endTime: end,
         driverVehicleCategory,
-        fitAcknowledged: Boolean(fitAcknowledged),
+        fitAcknowledged: acknowledgedFit,
         totalPriceCents,
         status: "PENDING_PAYMENT",
         holdExpiresAt,
       },
       { transaction },
     );
+
+    await transaction.commit();
 
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ["card"],
@@ -139,7 +126,7 @@ router.post("/create-checkout-session", requireAuth, async (req, res, next) => {
           price_data: {
             currency: "usd",
             product_data: { name: `Parking at ${listing.title}` },
-            unit_amount: totalPriceCents,
+            unit_amount: reservation.totalPriceCents,
           },
           quantity: 1,
         },
@@ -148,20 +135,29 @@ router.post("/create-checkout-session", requireAuth, async (req, res, next) => {
       expires_at: Math.floor(holdExpiresAt.getTime() / 1000),
       success_url: `${process.env.CLIENT_ORIGIN}/booking-success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${process.env.CLIENT_ORIGIN}/booking-cancelled`,
-      metadata: {
-        reservationId: String(reservation.id),
-      },
+      metadata: { reservationId: String(reservation.id) },
     });
 
     reservation.stripeCheckoutSessionId = session.id;
-    await reservation.save({ transaction });
+    await reservation.save();
 
-    await transaction.commit();
-
-    res.json({ url: session.url });
+    return res.json({ url: session.url });
   } catch (error) {
-    if (transaction && !transaction.finished) await transaction.rollback();
-    next(error);
+    if (transaction && !transaction.finished) {
+      await transaction.rollback();
+    }
+
+    if (reservation && !reservation.stripeCheckoutSessionId) {
+      try {
+        reservation.status = "EXPIRED";
+        await reservation.save();
+      } catch (cleanupError) {
+        next(cleanupError);
+        return;
+      }
+    }
+
+    return next(error);
   }
 });
 
