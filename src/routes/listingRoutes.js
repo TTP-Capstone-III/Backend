@@ -425,7 +425,10 @@ router.get("/", optionalAuth, async (req, res, next) => {
       const conflicts = await Reservation.findAll({
         where: {
           listingId: { [Op.in]: candidates.map((listing) => listing.id) },
-          status: "CONFIRMED",
+          [Op.or]: [
+            { status: "CONFIRMED" },
+            { status: "PENDING_PAYMENT", holdExpiresAt: { [Op.gt]: new Date() } },
+          ],
           startTime: { [Op.lt]: endTime.value },
           endTime: { [Op.gt]: startTime.value },
         },
@@ -747,6 +750,45 @@ router.post("/:id/photo", requireAuth, async (req, res, next) => {
     await listing.save();
 
     return res.status(200).json(detailedListing(listing, true));
+  } catch (error) {
+    return next(error);
+  }
+});
+
+// Permanently delete a listing (owning host only). Blocked if any reservation exists.
+router.delete("/:id", requireAuth, async (req, res, next) => {
+  const listingId = Number(req.params.id);
+
+  if (!Number.isInteger(listingId) || listingId <= 0) {
+    return res.status(400).json({ error: "Listing id must be a positive integer" });
+  }
+
+  try {
+    const listing = await Listing.findByPk(listingId);
+
+    if (!listing) {
+      return res.status(404).json({ error: "Listing not found" });
+    }
+
+    if (listing.hostId !== req.user.id) {
+      return res.status(403).json({
+        error: "Only the host who owns this listing can delete it",
+      });
+    }
+
+    const existingReservation = await Reservation.findOne({
+      where: { listingId },
+    });
+
+    if (existingReservation) {
+      return res.status(409).json({
+        error: "This listing has reservation history and cannot be deleted. Deactivate it instead.",
+      });
+    }
+
+    await listing.destroy();
+
+    return res.status(204).send();
   } catch (error) {
     return next(error);
   }
