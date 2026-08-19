@@ -11,6 +11,32 @@ const router = express.Router();
 const MIN_INTERVAL_MS = 30 * 60 * 1000; // Listing and search intervals must be at least 30 minutes.
 const EXTERNAL_IMAGE_PUBLIC_ID = "external-image"; // Temporary value until image uploads are added.
 
+const cloudinary = require("../cloudinary"); //give route access to configured Cloudinary client
+const { Readable } = require("stream"); //stream Multer's inmemory file buffer to Cloudinary
+
+const upload = require("../middlewares/upload");
+
+// Helper function to upload buffer to Cloudinary
+function uploadBufferToCloudinary(buffer) {
+  //promise constructor create promise object, which takes two functions as params 
+  return new Promise((resolve, reject) => {
+    //create an upload stream to cloudinary
+    const uploadStream = cloudinary.uploader.upload_stream(
+      {
+        folder: "capstone-3/listings", //organize image in a folder
+      },
+      (error, result) => {
+        if (error) reject(error);
+        else resolve(result);
+      },
+    );
+
+    //Convert buffer to stream and pipe it to cloudinary
+    const readableStream = Readable.from(buffer);
+    readableStream.pipe(uploadStream);
+  });
+}
+
 // Validate required text and return its trimmed value.
 function readRequiredText(value, fieldName, minimumLength, maximumLength) {
   if (typeof value !== "string") {
@@ -69,7 +95,11 @@ function readNumber(value, fieldName, minimum, maximum) {
 
   const parsedValue = Number(value);
 
-  if (!Number.isFinite(parsedValue) || parsedValue < minimum || parsedValue > maximum) {
+  if (
+    !Number.isFinite(parsedValue) ||
+    parsedValue < minimum ||
+    parsedValue > maximum
+  ) {
     return {
       error: `${fieldName} must be between ${minimum} and ${maximum}`,
     };
@@ -111,7 +141,12 @@ function validateListingInput(body, coordinatesRequired) {
   const title = readRequiredText(body.title, "title", 5, 100);
   if (title.error) return { error: title.error };
 
-  const description = readRequiredText(body.description, "description", 20, 1200);
+  const description = readRequiredText(
+    body.description,
+    "description",
+    20,
+    1200,
+  );
   if (description.error) return { error: description.error };
 
   const streetAddress = readRequiredText(
@@ -122,17 +157,28 @@ function validateListingInput(body, coordinatesRequired) {
   );
   if (streetAddress.error) return { error: streetAddress.error };
 
-  const neighborhood = readRequiredText(body.neighborhood, "neighborhood", 2, 80);
+  const neighborhood = readRequiredText(
+    body.neighborhood,
+    "neighborhood",
+    2,
+    80,
+  );
   if (neighborhood.error) return { error: neighborhood.error };
 
   const city = readRequiredText(body.city, "city", 2, 80);
   if (city.error) return { error: city.error };
 
-  if (typeof body.state !== "string" || !/^[A-Za-z]{2}$/.test(body.state.trim())) {
+  if (
+    typeof body.state !== "string" ||
+    !/^[A-Za-z]{2}$/.test(body.state.trim())
+  ) {
     return { error: "state must be a two-letter code" };
   }
 
-  if (typeof body.zipCode !== "string" || !/^\d{5}$/.test(body.zipCode.trim())) {
+  if (
+    typeof body.zipCode !== "string" ||
+    !/^\d{5}$/.test(body.zipCode.trim())
+  ) {
     return { error: "zipCode must be a 5-digit code" };
   }
 
@@ -183,7 +229,12 @@ function validateListingInput(body, coordinatesRequired) {
     return { error: "otherVehicleDescription must be text" };
   }
 
-  const instructions = readRequiredText(body.instructions, "instructions", 10, 800);
+  const instructions = readRequiredText(
+    body.instructions,
+    "instructions",
+    10,
+    800,
+  );
   if (instructions.error) return { error: instructions.error };
 
   const hasLatitude =
@@ -196,7 +247,9 @@ function validateListingInput(body, coordinatesRequired) {
     body.exactLongitude !== "";
 
   if (hasLatitude !== hasLongitude) {
-    return { error: "exactLatitude and exactLongitude must be provided together" };
+    return {
+      error: "exactLatitude and exactLongitude must be provided together",
+    };
   }
 
   if (coordinatesRequired && !hasLatitude) {
@@ -206,7 +259,12 @@ function validateListingInput(body, coordinatesRequired) {
   let coordinates = {};
 
   if (hasLatitude) {
-    const exactLatitude = readNumber(body.exactLatitude, "exactLatitude", -90, 90);
+    const exactLatitude = readNumber(
+      body.exactLatitude,
+      "exactLatitude",
+      -90,
+      90,
+    );
     if (exactLatitude.error) return { error: exactLatitude.error };
 
     const exactLongitude = readNumber(
@@ -542,24 +600,30 @@ router.get("/:id", optionalAuth, async (req, res, next) => {
 });
 
 // Temporarily accept an image URL until direct photo uploads are added later.
-router.post("/", requireAuth, async (req, res, next) => {
+router.post("/", requireAuth, upload.single('image'), async (req, res, next) => {
   const validation = validateListingInput(req.body, true);
 
   if (validation.error) {
     return res.status(400).json({ error: validation.error });
   }
 
-  const imageUrl = readImageUrl(req.body.imageUrl);
+  //const imageUrl = readImageUrl(req.body.imageUrl);
+  //check if file was uploaded
+  const imageUrl = req.file ? null : readImageUrl(req.body.imageUrl);
 
-  if (imageUrl.error) {
+  if (!req.file && imageUrl.error) {
     return res.status(400).json({ error: imageUrl.error });
   }
 
   try {
+    const uploadImage = req.file
+      ? await uploadBufferToCloudinary(req.file.buffer)
+      : null;
+
     const listing = await Listing.create({
       ...validation.value,
-      imageUrl: imageUrl.value,
-      imagePublicId: EXTERNAL_IMAGE_PUBLIC_ID,
+      imageUrl: uploadImage ? uploadImage.secure_url : imageUrl.value,
+      imagePublicId: uploadImage ? uploadImage.public_id : EXTERNAL_IMAGE_PUBLIC_ID,
       hostId: req.user.id, // Trust the authenticated user instead of a body-supplied host ID.
       isActive: true,
     });
@@ -575,7 +639,9 @@ router.patch("/:id", requireAuth, async (req, res, next) => {
   const listingId = Number(req.params.id);
 
   if (!Number.isInteger(listingId) || listingId <= 0) {
-    return res.status(400).json({ error: "Listing id must be a positive integer" });
+    return res
+      .status(400)
+      .json({ error: "Listing id must be a positive integer" });
   }
 
   try {
@@ -594,8 +660,9 @@ router.patch("/:id", requireAuth, async (req, res, next) => {
     // New coordinates are required when the address changes.
     const addressChanged = ["streetAddress", "city", "state", "zipCode"].some(
       (field) =>
-        String(req.body[field] ?? "").trim().toLowerCase() !==
-        String(listing[field]).trim().toLowerCase(),
+        String(req.body[field] ?? "")
+          .trim()
+          .toLowerCase() !== String(listing[field]).trim().toLowerCase(),
     );
 
     const validation = validateListingInput(req.body, addressChanged);
@@ -646,7 +713,9 @@ router.patch("/:id/status", requireAuth, async (req, res, next) => {
   const listingId = Number(req.params.id);
 
   if (!Number.isInteger(listingId) || listingId <= 0) {
-    return res.status(400).json({ error: "Listing id must be a positive integer" });
+    return res
+      .status(400)
+      .json({ error: "Listing id must be a positive integer" });
   }
 
   if (typeof req.body.isActive !== "boolean") {
@@ -680,7 +749,9 @@ router.delete("/:id", requireAuth, async (req, res, next) => {
   const listingId = Number(req.params.id);
 
   if (!Number.isInteger(listingId) || listingId <= 0) {
-    return res.status(400).json({ error: "Listing id must be a positive integer" });
+    return res
+      .status(400)
+      .json({ error: "Listing id must be a positive integer" });
   }
 
   try {
@@ -720,7 +791,9 @@ router.post("/:id/photo", requireAuth, async (req, res, next) => {
   const listingId = Number(req.params.id);
 
   if (!Number.isInteger(listingId) || listingId <= 0) {
-    return res.status(400).json({ error: "Listing id must be a positive integer" });
+    return res
+      .status(400)
+      .json({ error: "Listing id must be a positive integer" });
   }
 
   try {
