@@ -1,129 +1,99 @@
 const express = require("express");
-const { Op, Transaction } = require("sequelize"); // Op builds overlap checks; Transaction sets isolation.
 const router = express.Router();
-
-const { db, Listing, Reservation, User } = require("../models");
+const { Op } = require("sequelize");
+const { Listing, Reservation, User } = require("../models");
 const { vehicleCategories } = require("../models/Listing");
 const { evaluateVehicleFit, calculatePrice } = require("../utils/domain");
 const { requireAuth } = require("../middlewares/auth");
 
-const MIN_RESERVATION_MS = 30 * 60 * 1000; // Minimum reservation length in milliseconds.
+const MIN_RESERVATION_MS = 30 * 60 * 1000;
 
-//Validates possible reservation and returns: Calculated price, start/end time, fit result, time conflicts
-router.post("/quote", requireAuth, async (req, res, next) => {
-  const {
+function activeConflictWhere(listingId, start, end) {
+  return {
     listingId,
-    startTime,
-    endTime,
-    driverVehicleCategory,
-    fitAcknowledged,
-  } = req.body;
+    [Op.and]: [
+      { startTime: { [Op.lt]: end } },
+      { endTime: { [Op.gt]: start } },
+    ],
+    [Op.or]: [
+      { status: "CONFIRMED" },
+      { status: "PENDING_PAYMENT", holdExpiresAt: { [Op.gt]: new Date() } },
+    ],
+  };
+}
+
+router.post("/quote", requireAuth, async (req, res, next) => {
+  const { listingId, startTime, endTime, driverVehicleCategory, fitAcknowledged } = req.body;
 
   if (!listingId || !startTime || !endTime || !driverVehicleCategory) {
     return res.status(400).json({
-      error:
-        "listingId, startTime, endTime, and driverVehicleCategory are required",
+      error: "listingId, startTime, endTime, and driverVehicleCategory are required",
     });
   }
 
   if (!vehicleCategories.includes(driverVehicleCategory)) {
-    return res.status(400).json({
-      error: "driverVehicleCategory is invalid",
-    });
+    return res.status(400).json({ error: "driverVehicleCategory is invalid" });
   }
 
-  const parsedListingId = Number(listingId); // Do not send the raw request value to Sequelize.
-  const acknowledgedFit = fitAcknowledged ?? false; // Default only null or undefined to false.
+  const parsedListingId = Number(listingId);
+  const acknowledgedFit = fitAcknowledged ?? false;
 
   if (typeof acknowledgedFit !== "boolean") {
-    return res
-      .status(400)
-      .json({ error: "fitAcknowledged must be true or false" });
+    return res.status(400).json({ error: "fitAcknowledged must be true or false" });
   }
 
   if (!Number.isInteger(parsedListingId) || parsedListingId <= 0) {
-    return res
-      .status(400)
-      .json({ error: "listingId must be a positive integer" });
+    return res.status(400).json({ error: "listingId must be a positive integer" });
   }
 
   const start = new Date(startTime);
   const end = new Date(endTime);
 
   if (isNaN(start.getTime()) || isNaN(end.getTime())) {
-    return res
-      .status(400)
-      .json({ error: "startTime and endTime must be valid dates" });
+    return res.status(400).json({ error: "startTime and endTime must be valid dates" });
   }
-
   if (start >= end) {
     return res.status(400).json({ error: "startTime must be before endTime" });
   }
-
   if (start <= new Date()) {
     return res.status(400).json({ error: "startTime must be in the future" });
   }
-
   if (end - start < MIN_RESERVATION_MS) {
-    return res
-      .status(400)
-      .json({ error: "Reservation must be at least 30 minutes" });
+    return res.status(400).json({ error: "Reservation must be at least 30 minutes" });
   }
 
   try {
     const listing = await Listing.findByPk(parsedListingId);
 
     if (!listing || !listing.isActive) {
-      return res.status(409).json({
-        error: "This listing is not currently active",
-      });
+      return res.status(409).json({ error: "This listing is not currently active" });
     }
-
     if (listing.hostId === req.user.id) {
-      return res.status(400).json({
-        error: "You cannot quote your own listing",
-      });
+      return res.status(400).json({ error: "You cannot quote your own listing" });
     }
-
     if (start < listing.availableFrom || end > listing.availableUntil) {
       return res.status(409).json({
         error: "Requested time is outside the listing's availability window",
       });
     }
 
-    const fit = evaluateVehicleFit(
-      listing.maxVehicleCategory,
-      driverVehicleCategory,
-    );
+    const fit = evaluateVehicleFit(listing.maxVehicleCategory, driverVehicleCategory);
 
     if (!fit.fits) {
-      return res
-        .status(422)
-        .json({ error: "This vehicle is larger than the listing allows" });
+      return res.status(422).json({ error: "This vehicle is larger than the listing allows" });
     }
     if (fit.status === "ACK_REQUIRED" && !acknowledgedFit) {
       return res.status(422).json({
         error: "You must acknowledge that the vehicle fit is uncertain",
       });
     }
+
     const conflict = await Reservation.findOne({
-      // We only need to know whether one conflict exists.
-      where: {
-        listingId: parsedListingId,
-        status: "CONFIRMED",
-        startTime: {
-          [Op.lt]: end, // Existing reservation starts before the requested reservation ends.
-        },
-        endTime: {
-          [Op.gt]: start, // Existing reservation ends after the requested reservation starts.
-        },
-      },
+      where: activeConflictWhere(parsedListingId, start, end),
     });
 
     if (conflict) {
-      return res
-        .status(409)
-        .json({ error: "This time slot is already booked" });
+      return res.status(409).json({ error: "This time slot is already booked" });
     }
 
     const { billableBlocks, totalPriceCents } = calculatePrice(
@@ -134,8 +104,7 @@ router.post("/quote", requireAuth, async (req, res, next) => {
 
     const fitMessage =
       fit.status === "ACK_REQUIRED"
-        ? (listing.otherVehicleDescription ?? //check if null, if yes, use fallback
-          "Fit cannot be confirmed automatically.") //<<fallback
+        ? listing.otherVehicleDescription ?? "Fit cannot be confirmed automatically."
         : "Your vehicle should fit.";
 
     return res.status(200).json({
@@ -152,187 +121,15 @@ router.post("/quote", requireAuth, async (req, res, next) => {
   }
 });
 
-// POST create a new reservation
-router.post("/", requireAuth, async (req, res, next) => {
-  const {
-    listingId,
-    startTime,
-    endTime,
-    driverVehicleCategory,
-    fitAcknowledged,
-  } = req.body;
-
-  if (!listingId || !startTime || !endTime || !driverVehicleCategory) {
-    return res.status(400).json({
-      error:
-        "listingId, startTime, endTime, and driverVehicleCategory are required",
-    });
-  }
-
-  if (!vehicleCategories.includes(driverVehicleCategory)) {
-    return res.status(400).json({
-      error: "driverVehicleCategory is invalid",
-    });
-  }
-
-  const parsedListingId = Number(listingId); // Normalize the request ID before database queries.
-  const acknowledgedFit = fitAcknowledged ?? false; // Omitted acknowledgment means false.
-
-  if (typeof acknowledgedFit !== "boolean") {
-    return res
-      .status(400)
-      .json({ error: "fitAcknowledged must be true or false" });
-  }
-
-  if (!Number.isInteger(parsedListingId) || parsedListingId <= 0) {
-    return res
-      .status(400)
-      .json({ error: "listingId must be a positive integer" });
-  }
-
-  const start = new Date(startTime);
-  const end = new Date(endTime);
-
-  if (isNaN(start.getTime()) || isNaN(end.getTime())) {
-    return res
-      .status(400)
-      .json({ error: "startTime and endTime must be valid dates" });
-  }
-
-  if (start >= end) {
-    return res.status(400).json({ error: "startTime must be before endTime" });
-  }
-
-  if (start <= new Date()) {
-    return res.status(400).json({ error: "startTime must be in the future" });
-  }
-
-  //Reservation time : 30 mins check
-  if (end - start < MIN_RESERVATION_MS) {
-    return res
-      .status(400)
-      .json({ error: "Reservation must be at least 30 minutes" });
-  }
-
-  let transaction;
-
-  try {
-    transaction = await db.transaction({
-      // Treat the availability check and creation as one unit.
-      isolationLevel: Transaction.ISOLATION_LEVELS.READ_COMMITTED,
-    });
-
-    const listing = await Listing.findByPk(parsedListingId, {
-      transaction, //Run this query inside our transaction.
-      lock: transaction.LOCK.UPDATE, //Other booking transactions must wait before locking the same listing.
-    });
-
-    if (!listing || !listing.isActive) {
-      return res.status(409).json({
-        error: "This listing is not currently active",
-      });
-    }
-
-    if (listing.hostId === req.user.id) {
-      return res
-        .status(400)
-        .json({ error: "You cannot book your own listing" });
-    }
-
-    if (start < listing.availableFrom || end > listing.availableUntil) {
-      return res.status(409).json({
-        error: "Requested time is outside the listing's availability window",
-      });
-    }
-
-    const fit = evaluateVehicleFit(
-      listing.maxVehicleCategory,
-      driverVehicleCategory,
-    );
-
-    if (!fit.fits) {
-      return res
-        .status(422)
-        .json({ error: "This vehicle is larger than the listing allows" });
-    }
-
-    if (fit.status === "ACK_REQUIRED" && !acknowledgedFit) {
-      return res.status(422).json({
-        error: "You must acknowledge that the vehicle fit is uncertain",
-      });
-    }
-
-    // Ask the database for one confirmed overlapping reservation
-    const overlapping = await Reservation.findOne({
-      // Check inside the same locked transaction.
-      where: {
-        listingId: parsedListingId,
-        status: "CONFIRMED",
-        startTime: {
-          [Op.lt]: end, // Existing start is before the requested end.
-        },
-        endTime: {
-          [Op.gt]: start, // Existing end is after the requested start.
-        },
-      },
-      transaction,
-    });
-
-    if (overlapping) {
-      return res
-        .status(409)
-        .json({ error: "This time slot is already booked" });
-    }
-
-    const { totalPriceCents } = calculatePrice(
-      listing.hourlyPriceCents,
-      start,
-      end,
-    );
-
-    const reservation = await Reservation.create(
-      {
-        listingId: parsedListingId,
-        driverId: req.user.id,
-        startTime: start,
-        endTime: end,
-        driverVehicleCategory,
-        fitAcknowledged: acknowledgedFit,
-        totalPriceCents,
-        status: "CONFIRMED",
-      },
-      {
-        transaction,
-      },
-    );
-    await transaction.commit(); // Permanently save only after every booking check succeeds.
-    const safeListing = listing.toJSON(); // Use a plain response copy instead of mutating Sequelize data.
-    delete safeListing.imagePublicId; // Keep the backend's image-storage ID out of the response.
-
-    return res.status(201).json({
-      ...reservation.toJSON(),
-      listing: safeListing,
-    });
-  } catch (error) {
-    return next(error);
-  } finally {
-    if (transaction && !transaction.finished) {
-      await transaction.rollback();
-    }
-  }
-});
-
-// GET current user's own reservations (as a driver)
 router.get("/driver", requireAuth, async (req, res, next) => {
   try {
     const reservations = await Reservation.findAll({
-      where: { driverId: req.user.id }, // Never accept another driver's ID from the request.
+      where: { driverId: req.user.id },
       include: [
         {
           model: Listing,
           as: "listing",
           attributes: [
-            // Explicit response allowlist for listing details.
             "id",
             "title",
             "neighborhood",
@@ -352,15 +149,13 @@ router.get("/driver", requireAuth, async (req, res, next) => {
     return next(error);
   }
 });
-// PATCH cancel a reservation
+
 router.patch("/:id/cancel", requireAuth, async (req, res, next) => {
   try {
-    const parsedReservationId = Number(req.params.id); // Normalize the URL parameter before querying.
+    const parsedReservationId = Number(req.params.id);
 
     if (!Number.isInteger(parsedReservationId) || parsedReservationId <= 0) {
-      return res.status(400).json({
-        error: "Reservation id must be a positive integer",
-      });
+      return res.status(400).json({ error: "Reservation id must be a positive integer" });
     }
 
     const reservation = await Reservation.findByPk(parsedReservationId);
@@ -368,24 +163,16 @@ router.patch("/:id/cancel", requireAuth, async (req, res, next) => {
     if (!reservation) {
       return res.status(404).json({ error: "Reservation not found" });
     }
-
     if (reservation.driverId !== req.user.id) {
-      // Only the driver who booked it may cancel it.
-      return res
-        .status(403)
-        .json({ error: "Only the driver who booked can cancel" });
+      return res.status(403).json({ error: "Only the driver who booked can cancel" });
     }
-
-    if (
-      reservation.status !== "CONFIRMED" ||
-      reservation.startTime <= new Date()
-    ) {
+    if (reservation.status !== "CONFIRMED" || reservation.startTime <= new Date()) {
       return res
         .status(409)
         .json({ error: "Only future confirmed reservations can be cancelled" });
     }
 
-    reservation.status = "CANCELLED"; // Preserve the record instead of deleting reservation history.
+    reservation.status = "CANCELLED";
     await reservation.save();
 
     return res.status(200).json(reservation);
@@ -395,3 +182,4 @@ router.patch("/:id/cancel", requireAuth, async (req, res, next) => {
 });
 
 module.exports = router;
+module.exports.activeConflictWhere = activeConflictWhere;

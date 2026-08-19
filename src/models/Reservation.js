@@ -38,9 +38,18 @@ const Reservation = db.define(
       },
     },
     status: {
-      type: DataTypes.ENUM("CONFIRMED", "CANCELLED"),
+      type: DataTypes.ENUM("CONFIRMED", "CANCELLED", "EXPIRED", "PENDING_PAYMENT"),
       allowNull: false,
-      defaultValue: "CONFIRMED",
+      defaultValue: "PENDING_PAYMENT",
+    },
+    holdExpiresAt: {
+      type: DataTypes.DATE,
+      allowNull: true,
+    },
+    stripeCheckoutSessionId: {
+      type: DataTypes.STRING,
+      allowNull: true,
+      unique: true,
     },
   },
   {
@@ -49,6 +58,7 @@ const Reservation = db.define(
     indexes: [
       { fields: ["listingId", "startTime", "endTime"] },
       { fields: ["driverId"] },
+      { fields: ["stripeCheckoutSessionId"] },
     ],
   },
 );
