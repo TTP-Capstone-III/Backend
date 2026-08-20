@@ -4,6 +4,8 @@ const { User } = require("../models");
 const COOKIE_NAME = "session";
 const ONE_WEEK_IN_MS = 7 * 24 * 60 * 60 * 1000;
 
+const isProduction = process.env.NODE_ENV === "production";
+
 //Creates JWT
 function createToken(userId) {
   if (!process.env.JWT_SECRET) {
@@ -29,8 +31,8 @@ function setSession(response, userId) {
   //3rd argument : object which controls how the browser stores and sends the cookies
   response.cookie(COOKIE_NAME, token, {
     httpOnly: true, //prevents FE JS from reading the cookie through document.cookie
-    sameSite: "lax", //limits when the browser sends the cookie during requests originating from other websites.
-    secure: process.env.NODE_ENV === "production",
+    sameSite: isProduction ? "none" : "lax", //limits when the browser sends the cookie during requests originating from other websites.
+    secure: isProduction,
     maxAge: ONE_WEEK_IN_MS,
     path: "/",
   });
@@ -40,8 +42,8 @@ function setSession(response, userId) {
 function clearSession(response) {
   response.clearCookie(COOKIE_NAME, {
     httpOnly: true,
-    sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
+    sameSite: isProduction ? "none" : "lax",
+    secure: isProduction,
     path: "/",
   });
 }
